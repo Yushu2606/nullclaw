@@ -845,7 +845,7 @@ fn buildChatRequestBody(
     var max_buf: [16]u8 = undefined;
     const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{max_output_tokens}) catch return error.VertexApiError;
     try buf.appendSlice(allocator, max_str);
-    try root.appendGeminiThinkingConfig(&buf, allocator, model, request.reasoning_effort);
+    try root.appendVertexThinkingConfig(&buf, allocator, model, request.reasoning_effort);
     try buf.appendSlice(allocator, "}}");
 
     return try buf.toOwnedSlice(allocator);
@@ -1094,7 +1094,7 @@ test "buildChatRequestBody maps reasoning_effort to thinkingLevel for gemini-3 f
 
     const gen = parsed.value.object.get("generationConfig").?.object;
     const thinking = gen.get("thinkingConfig").?.object;
-    try std.testing.expectEqualStrings("medium", thinking.get("thinkingLevel").?.string);
+    try std.testing.expectEqualStrings("MEDIUM", thinking.get("thinkingLevel").?.string);
 }
 
 test "buildChatRequestBody maps reasoning_effort to thinkingBudget for gemini-2.5" {

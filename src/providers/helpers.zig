@@ -205,6 +205,11 @@ const GeminiThinkingProfile = union(enum) {
     budget: u32,
 };
 
+const GeminiThinkingTarget = enum {
+    gemini_api,
+    vertex_ai,
+};
+
 fn parseGeminiReasoningEffort(reasoning_effort: ?[]const u8) ?GeminiReasoningEffort {
     const raw = reasoning_effort orelse return null;
     if (std.ascii.eqlIgnoreCase(raw, "off") or std.ascii.eqlIgnoreCase(raw, "none")) return .none;
@@ -276,13 +281,45 @@ pub fn appendGeminiThinkingConfig(
     model: []const u8,
     reasoning_effort: ?[]const u8,
 ) !void {
+    return appendThinkingConfigForTarget(buf, allocator, model, reasoning_effort, .gemini_api);
+}
+
+/// Append Vertex thinking controls under generationConfig when reasoning effort is set.
+/// Vertex expects enum-style uppercase values for `thinkingLevel`.
+pub fn appendVertexThinkingConfig(
+    buf: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    model: []const u8,
+    reasoning_effort: ?[]const u8,
+) !void {
+    return appendThinkingConfigForTarget(buf, allocator, model, reasoning_effort, .vertex_ai);
+}
+
+fn normalizeVertexThinkingLevel(level: []const u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(level, "minimal")) return "MINIMAL";
+    if (std.ascii.eqlIgnoreCase(level, "low")) return "LOW";
+    if (std.ascii.eqlIgnoreCase(level, "medium")) return "MEDIUM";
+    return "HIGH";
+}
+
+fn appendThinkingConfigForTarget(
+    buf: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    model: []const u8,
+    reasoning_effort: ?[]const u8,
+    target: GeminiThinkingTarget,
+) !void {
     const profile = geminiThinkingProfile(model, reasoning_effort) orelse return;
 
     try buf.appendSlice(allocator, ",\"thinkingConfig\":{");
     switch (profile) {
         .level => |level| {
             try buf.appendSlice(allocator, "\"thinkingLevel\":");
-            try json_util.appendJsonString(buf, allocator, level);
+            const out_level = switch (target) {
+                .gemini_api => level,
+                .vertex_ai => normalizeVertexThinkingLevel(level),
+            };
+            try json_util.appendJsonString(buf, allocator, out_level);
         },
         .budget => |budget| {
             try buf.appendSlice(allocator, "\"thinkingBudget\":");
@@ -739,4 +776,20 @@ test "appendGeminiThinkingConfig omits none budget for gemini-2.5 pro" {
     defer parsed.deinit();
     const cfg = parsed.value.object.get("generationConfig").?.object;
     try std.testing.expect(cfg.get("thinkingConfig") == null);
+}
+
+test "appendVertexThinkingConfig uses uppercase thinkingLevel for gemini-3 flash" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+
+    try buf.appendSlice(alloc, "{\"generationConfig\":{\"maxOutputTokens\":1024");
+    try appendVertexThinkingConfig(&buf, alloc, "gemini-3.1-flash", "medium");
+    try buf.appendSlice(alloc, "}}");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, buf.items, .{});
+    defer parsed.deinit();
+    const cfg = parsed.value.object.get("generationConfig").?.object;
+    const thinking = cfg.get("thinkingConfig").?.object;
+    try std.testing.expectEqualStrings("MEDIUM", thinking.get("thinkingLevel").?.string);
 }
