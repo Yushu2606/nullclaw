@@ -818,11 +818,16 @@ pub const QQChannel = struct {
 
         // Update sequence number
         if (val.object.get("s")) |s_val| {
-            if (s_val == .integer and s_val.integer >= 0) {
-                const raw: u64 = @intCast(s_val.integer);
-                const clamped = @min(raw, @as(u64, std.math.maxInt(u32)));
-                self.sequence.store(@intCast(clamped), .release);
-                self.has_sequence.store(true, .release);
+            if (s_val == .integer) {
+                if (s_val.integer >= 0 and s_val.integer <= std.math.maxInt(u32)) {
+                    self.sequence.store(@intCast(s_val.integer), .release);
+                    self.has_sequence.store(true, .release);
+                } else {
+                    // Invalid sequence range (negative or wider than u32):
+                    // clear sequence state so heartbeats send null instead of stale value.
+                    self.sequence.store(0, .release);
+                    self.has_sequence.store(false, .release);
+                }
             }
         }
 
@@ -2061,7 +2066,7 @@ test "qq handleGatewayEvent READY" {
     try std.testing.expectEqual(@as(u32, 1), ch.sequence.load(.acquire));
 }
 
-test "qq handleGatewayEvent sequence clamps to u32 max" {
+test "qq handleGatewayEvent sequence overflow clears state" {
     const alloc = std.testing.allocator;
     var ch = QQChannel.init(alloc, .{});
     const ready_json =
@@ -2071,8 +2076,8 @@ test "qq handleGatewayEvent sequence clamps to u32 max" {
         if (ch.session_id) |sid| alloc.free(sid);
     }
     try ch.handleGatewayEvent(ready_json);
-    try std.testing.expect(ch.has_sequence.load(.acquire));
-    try std.testing.expectEqual(std.math.maxInt(u32), ch.sequence.load(.acquire));
+    try std.testing.expect(!ch.has_sequence.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), ch.sequence.load(.acquire));
 }
 
 test "qq handleGatewayEvent ignores negative sequence" {
@@ -2085,6 +2090,28 @@ test "qq handleGatewayEvent ignores negative sequence" {
         if (ch.session_id) |sid| alloc.free(sid);
     }
     try ch.handleGatewayEvent(ready_json);
+    try std.testing.expect(!ch.has_sequence.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), ch.sequence.load(.acquire));
+}
+
+test "qq handleGatewayEvent invalid sequence clears previous value" {
+    const alloc = std.testing.allocator;
+    var ch = QQChannel.init(alloc, .{});
+    defer {
+        if (ch.session_id) |sid| alloc.free(sid);
+    }
+
+    const ready_ok =
+        \\{"op":0,"s":77,"t":"READY","d":{"session_id":"sess_ok"}}
+    ;
+    try ch.handleGatewayEvent(ready_ok);
+    try std.testing.expect(ch.has_sequence.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 77), ch.sequence.load(.acquire));
+
+    const ready_overflow =
+        \\{"op":0,"s":5000000000,"t":"READY","d":{"session_id":"sess_overflow_after_ok"}}
+    ;
+    try ch.handleGatewayEvent(ready_overflow);
     try std.testing.expect(!ch.has_sequence.load(.acquire));
     try std.testing.expectEqual(@as(u32, 0), ch.sequence.load(.acquire));
 }
