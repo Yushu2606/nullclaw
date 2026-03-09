@@ -23,6 +23,8 @@ const subagent_mod = @import("subagent.zig");
 const subagent_runner = @import("subagent_runner.zig");
 const agent_routing = @import("agent_routing.zig");
 const provider_runtime = @import("providers/runtime_bundle.zig");
+const thread_stacks = @import("thread_stacks.zig");
+const control_plane = @import("control_plane.zig");
 
 const signal = @import("channels/signal.zig");
 const matrix = @import("channels/matrix.zig");
@@ -616,6 +618,34 @@ pub fn runTelegramLoop(
             if (enable_parallel) {
                 var handled_in_worker = false;
                 parallel_attempt: {
+                    if (control_plane.isStopLikeCommand(msg.content) and active_worker_threads.get(session_key) != null) {
+                        var interrupt = runtime.session_mgr.requestTurnInterrupt(session_key);
+                        defer interrupt.deinit(allocator);
+                        var dynamic_notice: ?[]u8 = null;
+                        defer if (dynamic_notice) |msg_alloc| allocator.free(msg_alloc);
+                        const immediate_notice: []const u8 = blk_notice: {
+                            if (interrupt.requested and interrupt.active_tool != null) {
+                                dynamic_notice = std.fmt.allocPrint(
+                                    allocator,
+                                    "Stop requested. Sent hard-stop signal to running tool: {s}.",
+                                    .{interrupt.active_tool.?},
+                                ) catch null;
+                                break :blk_notice dynamic_notice orelse "Stop requested. Sent hard-stop signal.";
+                            }
+                            if (interrupt.requested) break :blk_notice "Stop requested. Sent hard-stop signal to in-flight execution.";
+                            break :blk_notice "Stop requested, but no in-flight turn was found for interruption.";
+                        };
+                        tg_ptr.sendMessageWithReply(
+                            msg.sender,
+                            immediate_notice,
+                            reply_to_id,
+                        ) catch |err| {
+                            log.warn("failed to send immediate stop notice: {}", .{err});
+                        };
+                        handled_in_worker = true;
+                        break :parallel_attempt;
+                    }
+
                     // Preserve message order per session_key.
                     if (active_worker_threads.fetchRemove(session_key)) |entry| {
                         var idx: usize = 0;
@@ -684,7 +714,7 @@ pub fn runTelegramLoop(
                         .message_sender_id = task_message_sender_id,
                     };
 
-                    const thread = std.Thread.spawn(.{ .stack_size = 2 * 1024 * 1024 }, messageTaskWorker, .{task}) catch |err| {
+                    const thread = std.Thread.spawn(.{ .stack_size = thread_stacks.SESSION_TURN_STACK_SIZE }, messageTaskWorker, .{task}) catch |err| {
                         log.err("Failed to spawn worker thread: {}, falling back to synchronous", .{err});
                         task.deinit();
                         allocator.destroy(task);
@@ -945,7 +975,7 @@ pub fn spawnTelegramPolling(
 
     const tg_ptr: *telegram.TelegramChannel = @ptrCast(@alignCast(channel.ptr));
     const thread = try std.Thread.spawn(
-        .{ .stack_size = 2 * 1024 * 1024 },
+        .{ .stack_size = thread_stacks.SESSION_TURN_STACK_SIZE },
         runTelegramLoop,
         .{ allocator, config, runtime, tg_ls, tg_ptr },
     );
@@ -969,7 +999,7 @@ pub fn spawnSignalPolling(
 
     const sg_ptr: *signal.SignalChannel = @ptrCast(@alignCast(channel.ptr));
     const thread = try std.Thread.spawn(
-        .{ .stack_size = 2 * 1024 * 1024 },
+        .{ .stack_size = thread_stacks.SESSION_TURN_STACK_SIZE },
         runSignalLoop,
         .{ allocator, config, runtime, sg_ls, sg_ptr },
     );
@@ -993,7 +1023,7 @@ pub fn spawnMatrixPolling(
 
     const mx_ptr: *matrix.MatrixChannel = @ptrCast(@alignCast(channel.ptr));
     const thread = try std.Thread.spawn(
-        .{ .stack_size = 2 * 1024 * 1024 },
+        .{ .stack_size = thread_stacks.SESSION_TURN_STACK_SIZE },
         runMatrixLoop,
         .{ allocator, config, runtime, mx_ls, mx_ptr },
     );
@@ -1128,6 +1158,24 @@ test "shouldSuppressGroupReply suppresses only group replies with marker" {
     try std.testing.expect(shouldSuppressGroupReply(true, "ok [NO_REPLY]"));
     try std.testing.expect(!shouldSuppressGroupReply(false, "ok [NO_REPLY]"));
     try std.testing.expect(!shouldSuppressGroupReply(true, "regular reply"));
+}
+
+test "isStopLikeCommand matches stop and abort variants" {
+    try std.testing.expect(control_plane.isStopLikeCommand("/stop"));
+    try std.testing.expect(control_plane.isStopLikeCommand("  /stop  "));
+    try std.testing.expect(control_plane.isStopLikeCommand("/abort"));
+    try std.testing.expect(control_plane.isStopLikeCommand("/STOP"));
+    try std.testing.expect(control_plane.isStopLikeCommand("/abort@nullclaw_bot"));
+    try std.testing.expect(control_plane.isStopLikeCommand("/stop: now"));
+    try std.testing.expect(control_plane.isStopLikeCommand("/abort please"));
+}
+
+test "isStopLikeCommand rejects non-control commands" {
+    try std.testing.expect(!control_plane.isStopLikeCommand("stop"));
+    try std.testing.expect(!control_plane.isStopLikeCommand("/stopping"));
+    try std.testing.expect(!control_plane.isStopLikeCommand("/aborted"));
+    try std.testing.expect(!control_plane.isStopLikeCommand("/help"));
+    try std.testing.expect(!control_plane.isStopLikeCommand(""));
 }
 
 test "ProviderHolder tagged union fields" {
