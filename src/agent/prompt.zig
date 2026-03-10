@@ -496,7 +496,7 @@ fn writeXmlEscapedAttrValue(w: anytype, value: []const u8) !void {
 
 /// Append available skills with progressive loading.
 /// - always=true skills: full instruction text in the prompt
-/// - always=false skills: XML summary only (agent must use read_file to load)
+/// - always=false skills: XML summary only (agent must use file_read to load)
 /// - unavailable skills: marked with available="false" and missing deps
 fn appendSkillsSection(
     allocator: std.mem.Allocator,
@@ -532,53 +532,16 @@ fn appendSkillsSection(
 
     if (skill_list.len == 0) return;
 
-    // Single pass: partition into active (full text) and available (XML summary) buffers
-    var active_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer active_buf.deinit(allocator);
-    var avail_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer avail_buf.deinit(allocator);
-
+    var has_active = false;
+    var has_available = false;
     for (skill_list) |skill| {
         if (skill.always and skill.available) {
-            const aw = active_buf.writer(allocator);
-            try std.fmt.format(aw, "#### Skill: {s}\n\n", .{skill.name});
-            if (skill.description.len > 0)
-                try std.fmt.format(aw, "{s}\n\n", .{skill.description});
-            if (skill.instructions.len > 0) {
-                try aw.writeAll(skill.instructions);
-                try aw.writeAll("\n\n");
-            }
+            has_active = true;
         } else {
-            const vw = avail_buf.writer(allocator);
-            try vw.writeAll("  <skill>\n");
-            try vw.writeAll("    <name>");
-            try writeXmlEscapedAttrValue(vw, skill.name);
-            try vw.writeAll("</name>\n");
-            if (skill.description.len > 0) {
-                try vw.writeAll("    <description>");
-                try writeXmlEscapedAttrValue(vw, skill.description);
-                try vw.writeAll("</description>\n");
-            }
-            const skill_path = if (skill.path.len > 0) skill.path else workspace_dir;
-            const manifest = if (skill.manifest_file.len > 0) skill.manifest_file else "SKILL.md";
-            try vw.writeAll("    <location>");
-            try writeXmlEscapedAttrValue(vw, skill_path);
-            try vw.writeByte('/');
-            try writeXmlEscapedAttrValue(vw, manifest);
-            try vw.writeAll("</location>\n");
-            if (!skill.available) {
-                try vw.writeAll("    <available>false</available>\n");
-                if (skill.missing_deps.len > 0) {
-                    try vw.writeAll("    <missing>");
-                    try writeXmlEscapedAttrValue(vw, skill.missing_deps);
-                    try vw.writeAll("</missing>\n");
-                }
-            }
-            try vw.writeAll("  </skill>\n");
+            has_available = true;
         }
     }
 
-    // Assemble: preamble, then active section, then available section
     try w.writeAll("## Skills\n\n");
     try w.writeAll(
         \\You have access to user-installed skills that extend your capabilities.
@@ -587,16 +550,26 @@ fn appendSkillsSection(
         \\
     );
 
-    if (active_buf.items.len > 0) {
+    if (has_active) {
         try w.writeAll("### Active Skills\n\n");
         try w.writeAll("These skills are fully loaded. Follow their instructions whenever relevant to the current task.\n\n");
-        try w.writeAll(active_buf.items);
+        for (skill_list) |skill| {
+            if (!skill.always or !skill.available) continue;
+            try std.fmt.format(w, "#### Skill: {s}\n\n", .{skill.name});
+            if (skill.description.len > 0) {
+                try std.fmt.format(w, "{s}\n\n", .{skill.description});
+            }
+            if (skill.instructions.len > 0) {
+                try w.writeAll(skill.instructions);
+                try w.writeAll("\n\n");
+            }
+        }
     }
 
-    if (avail_buf.items.len > 0) {
+    if (has_available) {
         try w.writeAll("### Available Skills\n\n");
         try w.writeAll(
-            \\These skills are installed but not preloaded. Use the read_file tool on a skill's <location> to load its full instructions.
+            \\These skills are installed but not preloaded. Use the file_read tool on a skill's <location> to load its full instructions.
             \\
             \\1. Do NOT load a skill's <location> until the task matches its name or description.
             \\2. When multiple skills could match, load the most specific one first.
@@ -605,7 +578,32 @@ fn appendSkillsSection(
             \\
         );
         try w.writeAll("<available_skills>\n");
-        try w.writeAll(avail_buf.items);
+        for (skill_list) |skill| {
+            if (skill.always and skill.available) continue;
+
+            try w.writeAll("  <skill>\n");
+            try w.writeAll("    <name>");
+            try writeXmlEscapedAttrValue(w, skill.name);
+            try w.writeAll("</name>\n");
+            if (skill.description.len > 0) {
+                try w.writeAll("    <description>");
+                try writeXmlEscapedAttrValue(w, skill.description);
+                try w.writeAll("</description>\n");
+            }
+            const skill_path = if (skill.path.len > 0) skill.path else workspace_dir;
+            try w.writeAll("    <location>");
+            try writeXmlEscapedAttrValue(w, skill_path);
+            try w.writeAll("/SKILL.md</location>\n");
+            if (!skill.available) {
+                try w.writeAll("    <available>false</available>\n");
+                if (skill.missing_deps.len > 0) {
+                    try w.writeAll("    <missing>");
+                    try writeXmlEscapedAttrValue(w, skill.missing_deps);
+                    try w.writeAll("</missing>\n");
+                }
+            }
+            try w.writeAll("  </skill>\n");
+        }
         try w.writeAll("</available_skills>\n\n");
     }
 }
@@ -1496,8 +1494,8 @@ test "appendSkillsSection renders summary XML for always=false skill" {
     try std.testing.expect(std.mem.indexOf(u8, output, "<name>greeter</name>") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "<description>Greets the user</description>") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "<location>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "skill.json</location>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "read_file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "SKILL.md</location>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "file_read") != null);
     // Preamble should be present but no full instructions header
     try std.testing.expect(std.mem.indexOf(u8, output, "## Skills") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "### Active Skills") == null);
@@ -1640,7 +1638,7 @@ test "appendSkillsSection renders mixed always=true and always=false" {
     // Lazy skill should be in <available_skills> XML
     try std.testing.expect(std.mem.indexOf(u8, output, "<available_skills>") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "<name>lazy-skill</name>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "skill.json</location>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "SKILL.md</location>") != null);
 }
 
 test "appendSkillsSection renders unavailable skill with missing deps" {
@@ -1752,7 +1750,7 @@ test "installSkill end-to-end appears in buildSystemPrompt" {
     try std.testing.expect(std.mem.indexOf(u8, prompt, "### Available Skills") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "<name>e2e-installed-skill</name>") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "<location>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, prompt, "source/skill.json</location>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "source/SKILL.md</location>") != null);
 }
 
 test "buildSystemPrompt datetime appears before runtime" {
