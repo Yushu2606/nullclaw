@@ -27,6 +27,7 @@ pub const lancedb = if (build_options.enable_memory_lancedb) @import("engines/la
     pub const LanceDbMemory = struct {};
 };
 pub const api = @import("engines/api.zig");
+pub const clickhouse = @import("engines/clickhouse.zig");
 pub const registry = @import("engines/registry.zig");
 
 // retrieval/ (Layer B: Retrieval Engine)
@@ -70,6 +71,7 @@ pub const InMemoryLruMemory = memory_lru.InMemoryLruMemory;
 pub const LucidMemory = lucid.LucidMemory;
 pub const PostgresMemory = if (build_options.enable_postgres) postgres.PostgresMemory else struct {};
 pub const RedisMemory = redis.RedisMemory;
+pub const ClickHouseMemory = clickhouse.ClickHouseMemory;
 pub const LanceDbMemory = lancedb.LanceDbMemory;
 pub const ApiMemory = api.ApiMemory;
 pub const ResponseCache = cache.ResponseCache;
@@ -163,6 +165,8 @@ pub const SessionStore = struct {
         loadMessages: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, session_id: []const u8) anyerror![]MessageEntry,
         clearMessages: *const fn (ptr: *anyopaque, session_id: []const u8) anyerror!void,
         clearAutoSaved: *const fn (ptr: *anyopaque, session_id: ?[]const u8) anyerror!void,
+        saveUsage: ?*const fn (ptr: *anyopaque, session_id: []const u8, total_tokens: u64) anyerror!void = null,
+        loadUsage: ?*const fn (ptr: *anyopaque, session_id: []const u8) anyerror!?u64 = null,
     };
 
     pub fn saveMessage(self: SessionStore, session_id: []const u8, role: []const u8, content: []const u8) !void {
@@ -179,6 +183,16 @@ pub const SessionStore = struct {
 
     pub fn clearAutoSaved(self: SessionStore, session_id: ?[]const u8) !void {
         return self.vtable.clearAutoSaved(self.ptr, session_id);
+    }
+
+    pub fn saveUsage(self: SessionStore, session_id: []const u8, total_tokens: u64) !void {
+        const func = self.vtable.saveUsage orelse return error.NotSupported;
+        return func(self.ptr, session_id, total_tokens);
+    }
+
+    pub fn loadUsage(self: SessionStore, session_id: []const u8) !?u64 {
+        const func = self.vtable.loadUsage orelse return null;
+        return func(self.ptr, session_id);
     }
 };
 
@@ -727,7 +741,8 @@ pub fn initRuntime(
     const pg_cfg: ?config_types.MemoryPostgresConfig = if (std.mem.eql(u8, config.backend, "postgres")) config.postgres else null;
     const redis_cfg: ?config_types.MemoryRedisConfig = if (std.mem.eql(u8, config.backend, "redis")) config.redis else null;
     const api_cfg: ?config_types.MemoryApiConfig = if (std.mem.eql(u8, config.backend, "api")) config.api else null;
-    const cfg = registry.resolvePaths(allocator, desc, workspace_dir, pg_cfg, redis_cfg, api_cfg) catch |err| {
+    const clickhouse_cfg: ?config_types.MemoryClickHouseConfig = if (std.mem.eql(u8, config.backend, "clickhouse")) config.clickhouse else null;
+    const cfg = registry.resolvePaths(allocator, desc, workspace_dir, pg_cfg, redis_cfg, api_cfg, clickhouse_cfg) catch |err| {
         log.warn("memory path resolution failed for backend '{s}': {}", .{ config.backend, err });
         return null;
     };
@@ -1338,12 +1353,21 @@ test "SessionStore delegates through vtable" {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.call_count += 1;
         }
+        fn implSaveUsage(ptr: *anyopaque, _: []const u8, _: u64) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.call_count += 1;
+        }
+        fn implLoadUsage(_: *anyopaque, _: []const u8) anyerror!?u64 {
+            return 42;
+        }
 
         const sess_vtable = SessionStore.VTable{
             .saveMessage = &implSaveMessage,
             .loadMessages = &implLoadMessages,
             .clearMessages = &implClearMessages,
             .clearAutoSaved = &implClearAutoSaved,
+            .saveUsage = &implSaveUsage,
+            .loadUsage = &implLoadUsage,
         };
     };
 
@@ -1362,6 +1386,12 @@ test "SessionStore delegates through vtable" {
 
     try store.clearAutoSaved(null);
     try std.testing.expectEqual(@as(usize, 3), mock.call_count);
+
+    try store.saveUsage("s1", 7);
+    try std.testing.expectEqual(@as(usize, 4), mock.call_count);
+
+    const usage = try store.loadUsage("s1");
+    try std.testing.expectEqual(@as(?u64, 42), usage);
 }
 
 test "freeMessages frees all entries" {
@@ -1970,6 +2000,7 @@ test {
     _ = postgres;
     _ = redis;
     _ = lancedb;
+    _ = clickhouse;
     _ = registry;
     _ = @import("engines/contract_test.zig");
 
