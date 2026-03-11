@@ -648,6 +648,8 @@ src/
 nullclaw uses **CalVer** (`YYYY.M.D`) for releases — e.g. `v2026.2.20`.
 
 - **Tag format:** `vYYYY.M.D` (one release per day max; patch suffix `vYYYY.M.D.N` if needed)
+- **Release binaries derive their embedded version from the git tag** (`v...` -> `nullclaw --version`)
+- **Non-release builds default to `dev`** unless you override with `zig build -Dversion=...`
 - **No stability guarantees yet** — the project is pre-1.0, config and CLI may change between releases
 - **`nullclaw --version`** prints the current version
 

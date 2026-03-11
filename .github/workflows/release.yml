@@ -7,6 +7,7 @@ env:
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 jobs:
   build:
@@ -87,6 +88,15 @@ jobs:
         with:
           version: 0.15.2
 
+      - name: Resolve build version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=dev" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up JDK 17
         if: startsWith(matrix.target, 'android-')
         uses: actions/setup-java@v4
@@ -131,6 +141,7 @@ jobs:
           zig_args=(
             -Doptimize=ReleaseSmall
             -Dtarget=${zig_target}
+            -Dversion=${{ steps.version.outputs.value }}
           )
           if [ -n "${{ matrix.zig_cpu }}" ]; then
             zig_args+=(-Dcpu=${{ matrix.zig_cpu }})
@@ -148,6 +159,7 @@ jobs:
 
   release:
     needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -190,6 +202,7 @@ jobs:
 
   docker:
     needs: release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
