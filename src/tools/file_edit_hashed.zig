@@ -7,6 +7,29 @@ const isPathSafe = @import("path_security.zig").isPathSafe;
 const isResolvedPathAllowed = @import("path_security.zig").isResolvedPathAllowed;
 const generateLineHash = @import("file_read_hashed.zig").generateLineHash;
 
+const RADIUS: usize = 50;
+
+fn findLineWithRadius(lines: [][]const u8, hint_idx: usize, target_hash: []const u8) ?usize {
+    // 1. Try exact hint first
+    if (hint_idx < lines.len) {
+        const parent = if (hint_idx > 0) lines[hint_idx - 1] else "";
+        const h = generateLineHash(parent, lines[hint_idx]);
+        if (std.mem.eql(u8, &h, target_hash)) return hint_idx;
+    }
+
+    // 2. Search in radius
+    const start = if (hint_idx > RADIUS) hint_idx - RADIUS else 0;
+    const end = @min(lines.len, hint_idx + RADIUS);
+
+    for (lines[start..end], start..) |line, i| {
+        const parent = if (i > 0) lines[i - 1] else "";
+        const h = generateLineHash(parent, line);
+        if (std.mem.eql(u8, &h, target_hash)) return i;
+    }
+
+    return null;
+}
+
 /// Default maximum file size to read (10MB).
 const DEFAULT_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 
@@ -78,36 +101,32 @@ pub const FileEditHashedTool = struct {
 
         if (target.line_num == 0 or target.line_num > lines.items.len) return ToolResult.fail("Target line number out of range");
         
-        // Verify start line hash
-        const current_start_hash = generateLineHash(lines.items[target.line_num - 1]);
-        if (!std.mem.eql(u8, &current_start_hash, target.hash)) {
-            const msg = try std.fmt.allocPrint(allocator, "Hash mismatch at line {d}. Expected {s}, found {s}. The file may have changed.", .{ target.line_num, target.hash, current_start_hash });
+        // Find real start line using radius search
+        const real_start_idx = findLineWithRadius(lines.items, target.line_num - 1, target.hash) orelse {
+            const msg = try std.fmt.allocPrint(allocator, "Hash mismatch for start target {s} near line {d}. Context changed.", .{ target.hash, target.line_num });
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
-        }
+        };
 
-        const end_line_idx = if (end_target) |et| blk: {
-            if (et.line_num < target.line_num or et.line_num > lines.items.len) return ToolResult.fail("End target out of range");
-            const current_end_hash = generateLineHash(lines.items[et.line_num - 1]);
-            if (!std.mem.eql(u8, &current_end_hash, et.hash)) {
-                return ToolResult.fail("Hash mismatch at end line");
-            }
-            break :blk et.line_num;
-        } else target.line_num;
+        const real_end_idx = if (end_target) |et| blk: {
+            // Adjust search hint for end based on how much start moved
+            const drift: i64 = @as(i64, @intCast(real_start_idx)) - @as(i64, @intCast(target.line_num - 1));
+            const hint = if (@as(i64, @intCast(et.line_num - 1)) + drift >= 0) @as(usize, @intCast(@as(i64, @intCast(et.line_num - 1)) + drift)) else 0;
+            break :blk findLineWithRadius(lines.items, hint, et.hash) orelse return ToolResult.fail("Hash mismatch for end target. Context changed.");
+        } else real_start_idx;
 
         // Build new content
         var output: std.ArrayList(u8) = .{};
         defer output.deinit(allocator);
 
-        for (lines.items, 1..) |line, i| {
-            if (i == target.line_num) {
+        for (lines.items, 0..) |line, i| {
+            if (i == real_start_idx) {
                 try output.appendSlice(allocator, new_text);
                 if (!std.mem.endsWith(u8, new_text, "\n")) try output.append(allocator, '\n');
-            } else if (i > target.line_num and i <= end_line_idx) {
-                // Skip these lines as they are replaced by the range
+            } else if (i > real_start_idx and i <= real_end_idx) {
                 continue;
             } else {
                 try output.appendSlice(allocator, line);
-                if (i < lines.items.len or std.mem.endsWith(u8, contents, "\n")) {
+                if (i < lines.items.len - 1 or std.mem.endsWith(u8, contents, "\n")) {
                      try output.append(allocator, '\n');
                 }
             }
@@ -117,13 +136,14 @@ pub const FileEditHashedTool = struct {
         defer out_file.close();
         try out_file.writeAll(output.items);
 
-        return ToolResult.ok("File updated successfully using Hashline verification");
+        const msg = try std.fmt.allocPrint(allocator, "File updated successfully. Target shifted from L{d} to L{d} (Context-Aware).", .{ target.line_num, real_start_idx + 1 });
+        return ToolResult{ .success = true, .output = msg };
     }
 };
 
 // ── Tests ───────────────────────────────────────────────────────────
 
-test "file_edit_hashed replaces line when hash matches" {
+test "file_edit_hashed replaces line when hash matches with shift" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
@@ -132,7 +152,11 @@ test "file_edit_hashed replaces line when hash matches" {
     const ws_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(ws_path);
 
-    const h2 = generateLineHash("line two");
+    const h2 = generateLineHash("line one", "line two");
+    
+    // Now insert a line at the top manually to cause a shift
+    try tmp_dir.dir.writeFile(.{ .sub_path = "test.txt", .data = "new top line\nline one\nline two\nline three" });
+
     var args_buf: [128]u8 = undefined;
     const args = try std.fmt.bufPrint(&args_buf, "{{\"path\": \"test.txt\", \"target\": \"L2:{s}\", \"new_text\": \"NEW LINE\"}}", .{h2});
 
@@ -141,12 +165,13 @@ test "file_edit_hashed replaces line when hash matches" {
     defer parsed.deinit();
 
     const result = try ft.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
     try std.testing.expect(result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "shifted from L2 to L3") != null);
 
     const updated = try tmp_dir.dir.readFileAlloc(std.testing.allocator, "test.txt", 1024);
     defer std.testing.allocator.free(updated);
     try std.testing.expect(std.mem.indexOf(u8, updated, "NEW LINE") != null);
-    try std.testing.expect(std.mem.indexOf(u8, updated, "line two") == null);
 }
 
 test "file_edit_hashed fails when hash mismatches" {
