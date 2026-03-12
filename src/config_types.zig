@@ -426,6 +426,8 @@ pub const DingTalkConfig = struct {
     client_id: []const u8,
     client_secret: []const u8,
     allow_from: []const []const u8 = &.{},
+    ai_card_template_id: ?[]const u8 = null,
+    ai_card_streaming_key: ?[]const u8 = null,
 };
 
 pub const SignalConfig = struct {
