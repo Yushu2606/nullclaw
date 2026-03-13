@@ -1157,6 +1157,73 @@ test "buildSystemPrompt reads bootstrap docs from sqlite provider when workspace
     try std.testing.expect(std.mem.indexOf(u8, prompt, "sqlite-bootstrap-line") != null);
 }
 
+test "buildSystemPrompt project context stays equivalent across markdown hybrid and sqlite backends" {
+    const backends = [_][]const u8{ "markdown", "hybrid", "sqlite" };
+    var expected_fingerprint: ?u64 = null;
+    var expected_project_context: ?[]u8 = null;
+    defer if (expected_project_context) |value| std.testing.allocator.free(value);
+
+    for (backends) |backend| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+
+        const workspace = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+        defer std.testing.allocator.free(workspace);
+
+        var mem_rt: ?memory_root.MemoryRuntime = null;
+        defer if (mem_rt) |*rt| rt.deinit();
+        if (!bootstrap_mod.backendUsesFiles(backend)) {
+            mem_rt = memory_root.initRuntime(std.testing.allocator, &.{ .backend = backend }, workspace) orelse
+                return error.TestUnexpectedResult;
+        }
+
+        const mem_iface: ?memory_root.Memory = if (mem_rt) |rt| rt.memory else null;
+        const bootstrap_provider = try bootstrap_mod.createProvider(
+            std.testing.allocator,
+            backend,
+            mem_iface,
+            workspace,
+        );
+        defer bootstrap_provider.deinit();
+
+        try bootstrap_provider.store("AGENTS.md", "shared-agent-guidance");
+        try bootstrap_provider.store("SOUL.md", "shared-soul-guidance");
+        try bootstrap_provider.store("BOOTSTRAP.md", "shared-bootstrap-line");
+        try bootstrap_provider.store("MEMORY.md", "shared-memory-line");
+
+        const fingerprint = try workspacePromptFingerprint(
+            std.testing.allocator,
+            workspace,
+            bootstrap_provider,
+        );
+        if (expected_fingerprint) |value| {
+            try std.testing.expectEqual(value, fingerprint);
+        } else {
+            expected_fingerprint = fingerprint;
+        }
+
+        const prompt = try buildSystemPrompt(std.testing.allocator, .{
+            .workspace_dir = workspace,
+            .model_name = "test-model",
+            .tools = &.{},
+            .bootstrap_provider = bootstrap_provider,
+        });
+        defer std.testing.allocator.free(prompt);
+
+        const project_start = std.mem.indexOf(u8, prompt, "## Project Context") orelse
+            return error.TestUnexpectedResult;
+        const attachments_start = std.mem.indexOfPos(u8, prompt, project_start, "## Channel Attachments") orelse
+            return error.TestUnexpectedResult;
+        const project_context = prompt[project_start..attachments_start];
+
+        if (expected_project_context) |value| {
+            try std.testing.expectEqualStrings(value, project_context);
+        } else {
+            expected_project_context = try std.testing.allocator.dupe(u8, project_context);
+        }
+    }
+}
+
 test "buildSystemPrompt injects HEARTBEAT.md when present" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
