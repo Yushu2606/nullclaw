@@ -28,6 +28,7 @@ const observability = @import("observability.zig");
 const agent_routing = @import("agent_routing.zig");
 const security = @import("security/policy.zig");
 const PairingGuard = @import("security/pairing.zig").PairingGuard;
+const constantTimeEq = @import("security/pairing.zig").constantTimeEq;
 const channels = @import("channels/root.zig");
 const bus_mod = @import("bus.zig");
 const a2a = @import("a2a.zig");
@@ -525,7 +526,7 @@ pub fn parseQueryParam(target: []const u8, name: []const u8) ?[]const u8 {
 pub fn validateBearerToken(token: []const u8, paired_tokens: []const []const u8) bool {
     if (paired_tokens.len == 0) return true;
     for (paired_tokens) |pt| {
-        if (std.mem.eql(u8, token, pt)) return true;
+        if (constantTimeEq(token, pt)) return true;
     }
     return false;
 }
