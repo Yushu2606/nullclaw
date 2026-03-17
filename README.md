@@ -522,6 +522,10 @@ In that setup, topic `42` routes to `coder`, while the rest of the forum falls b
 
 Named agent profiles are configured separately from bindings. Bindings only choose which named agent handles a given chat/topic.
 
+If a named agent should run from its own workspace, set `agents.list[].workspace_path`.
+Relative paths are resolved from the directory that contains `config.json`, the workspace is scaffolded on first use, and the agent gets a durable memory namespace `agent:<agent-id>`.
+This applies to `nullclaw agent --agent <id>`, `/subagents spawn --agent <id>`, and routed sessions resolved through `bindings`.
+
 Minimal end-to-end example:
 
 ```json

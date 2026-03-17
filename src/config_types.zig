@@ -1458,6 +1458,7 @@ pub const NamedAgentConfig = struct {
     system_prompt: ?[]const u8 = null,
     /// Runtime-only source path preserved so Config.save() can round-trip file-backed prompts.
     system_prompt_path: ?[]const u8 = null,
+    workspace_path: ?[]const u8 = null,
     api_key: ?[]const u8 = null,
     temperature: ?f64 = null,
     max_depth: u32 = 3,

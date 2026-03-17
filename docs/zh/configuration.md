@@ -145,6 +145,53 @@ nullclaw onboard --interactive
   }
 }
 ```
+
+#### `agents.list[].workspace_path`
+
+当某个命名 agent 需要使用独立工作区而不是全局工作区时，使用 `workspace_path`。
+
+示例：
+
+```json
+{
+  "agents": {
+    "list": [
+      {
+        "id": "coder",
+        "model": { "primary": "ollama/qwen2.5-coder:14b" },
+        "system_prompt": "Focus on implementation and tests.",
+        "workspace_path": "agents/coder"
+      }
+    ]
+  }
+}
+```
+
+行为说明：
+
+- 相对路径会相对于 `config.json` 所在目录解析。
+- 绝对路径会原样使用。
+- 配置中可以写 `/` 或 `\`，运行时会按当前操作系统规范化路径分隔符。
+- 首次使用时，如果工作区不存在，nullclaw 会自动创建并初始化：
+  - `AGENTS.md`
+  - `SOUL.md`
+  - `IDENTITY.md`
+  - `MEMORY.md`
+
+隔离模型：
+
+- 该 agent 的文件操作、markdown memory 文件以及 workspace 相关上下文都会使用这个工作区。
+- 设置 `workspace_path` 后，该 agent 还会获得一个持久 memory namespace，格式为 `agent:<agent-id>`。
+- 这个 namespace 会用于：
+  - `nullclaw agent --agent <id>`
+  - `/subagents spawn --agent <id> ...`
+  - 通过 `bindings` 路由到该命名 agent 的会话
+
+实际效果：
+
+- 两个命名 agent 即使使用相同的 provider/model，也可以保持各自独立的持久笔记和工作区。
+- `workspace_path` 本身不会决定聊天路由；路由仍然由 `bindings`、`/bind` 或显式 `--agent` / `/subagents spawn --agent` 决定。
+
 ### `channels`
 
 - 渠道配置统一在 `channels.<name>` 下。

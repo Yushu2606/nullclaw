@@ -205,6 +205,52 @@ Notes:
 - Prefer short stable ids (`coder`, `researcher`) so chat commands stay simple.
 - Keep specialist prompts narrow; broad prompts overlap and reduce routing clarity.
 
+#### `agents.list[].workspace_path`
+
+Use `workspace_path` when a named agent should run from its own workspace instead of the global one.
+
+Example:
+
+```json
+{
+  "agents": {
+    "list": [
+      {
+        "id": "coder",
+        "model": { "primary": "ollama/qwen2.5-coder:14b" },
+        "system_prompt": "Focus on implementation and tests.",
+        "workspace_path": "agents/coder"
+      }
+    ]
+  }
+}
+```
+
+Behavior:
+
+- Relative paths are resolved relative to the directory that contains `config.json`.
+- Absolute paths are used as-is.
+- Both `/` and `\` are accepted in config; the runtime normalizes separators for the current OS.
+- On first use, nullclaw scaffolds the workspace if missing and creates:
+  - `AGENTS.md`
+  - `SOUL.md`
+  - `IDENTITY.md`
+  - `MEMORY.md`
+
+Isolation model:
+
+- The agent's file operations, markdown memory files, and workspace-scoped context use that workspace.
+- When `workspace_path` is set, the agent also gets a durable memory namespace of the form `agent:<agent-id>`.
+- That namespace is used by:
+  - `nullclaw agent --agent <id>`
+  - `/subagents spawn --agent <id> ...`
+  - routed sessions that resolve to that named agent through `bindings`
+
+Practical effect:
+
+- Two named agents can share the same provider/model family but keep separate durable notes and separate workspaces.
+- `workspace_path` does not route chats by itself. Routing still comes from `bindings`, `/bind`, or explicit `--agent` / `/subagents spawn --agent`.
+
 ### `identity` (AIEOS v1.1)
 
 Use this section when you want the runtime identity to come from an AIEOS document:
