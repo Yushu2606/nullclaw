@@ -50,6 +50,31 @@ fn normalizeTokenUsage(usage: *root.TokenUsage) void {
     }
 }
 
+fn finalizeGeminiStreamResult(
+    allocator: std.mem.Allocator,
+    accumulated: []const u8,
+    stream_usage: root.TokenUsage,
+) !root.StreamChatResult {
+    var usage = stream_usage;
+    const content = if (accumulated.len > 0)
+        try allocator.dupe(u8, accumulated)
+    else
+        null;
+
+    if (usage.prompt_tokens == 0 and usage.completion_tokens == 0 and usage.total_tokens == 0) {
+        usage.completion_tokens = @intCast((accumulated.len + 3) / 4);
+        usage.total_tokens = usage.completion_tokens;
+    } else {
+        normalizeTokenUsage(&usage);
+    }
+
+    return .{
+        .content = content,
+        .usage = usage,
+        .model = "",
+    };
+}
+
 fn parseUsageMetadataValue(v: std.json.Value) ?root.TokenUsage {
     if (v != .object) return null;
     const usage_obj = v.object;
@@ -832,8 +857,9 @@ pub const GeminiProvider = struct {
         var stream_usage = root.TokenUsage{};
         const file = child.stdout.?;
         var read_buf: [4096]u8 = undefined;
+        var saw_done = false;
 
-        while (true) {
+        outer: while (true) {
             const n = file.read(&read_buf) catch break;
             if (n == 0) break;
 
@@ -853,7 +879,10 @@ pub const GeminiProvider = struct {
                             try accumulated.appendSlice(allocator, text);
                             callback(ctx, root.StreamChunk.textDelta(text));
                         },
-                        .done => break,
+                        .done => {
+                            saw_done = true;
+                            break :outer;
+                        },
                         .skip => {},
                     }
                 } else {
@@ -863,7 +892,7 @@ pub const GeminiProvider = struct {
         }
 
         // Parse trailing line if stream ended without final newline.
-        if (line_buf.items.len > 0) {
+        if (!saw_done and line_buf.items.len > 0) {
             if (extractGeminiUsageFromSseLine(allocator, line_buf.items) catch null) |usage| {
                 stream_usage = usage;
             }
@@ -888,32 +917,37 @@ pub const GeminiProvider = struct {
             if (n == 0) break;
         }
 
-        const term = child.wait() catch return error.CurlWaitError;
+        const term = child.wait() catch |err| {
+            log.err("curlStreamGemini child.wait failed: {}", .{err});
+            if (root.shouldRecoverPartialStream(accumulated.items.len, saw_done)) {
+                log.warn("curlStreamGemini proceeding despite wait failure after partial stream output", .{});
+                callback(ctx, root.StreamChunk.finalChunk());
+                return finalizeGeminiStreamResult(allocator, accumulated.items, stream_usage);
+            }
+            return error.CurlWaitError;
+        };
         switch (term) {
-            .Exited => |code| if (code != 0) return error.CurlFailed,
-            else => return error.CurlFailed,
+            .Exited => |code| if (code != 0) {
+                if (root.shouldRecoverPartialStream(accumulated.items.len, saw_done)) {
+                    log.warn("curlStreamGemini exit code {d} after partial stream output; returning accumulated output", .{code});
+                    callback(ctx, root.StreamChunk.finalChunk());
+                    return finalizeGeminiStreamResult(allocator, accumulated.items, stream_usage);
+                }
+                return error.CurlFailed;
+            },
+            else => {
+                if (root.shouldRecoverPartialStream(accumulated.items.len, saw_done)) {
+                    log.warn("curlStreamGemini abnormal termination after partial stream output; returning accumulated output", .{});
+                    callback(ctx, root.StreamChunk.finalChunk());
+                    return finalizeGeminiStreamResult(allocator, accumulated.items, stream_usage);
+                }
+                return error.CurlFailed;
+            },
         }
 
         // Signal completion only after successful process exit.
         callback(ctx, root.StreamChunk.finalChunk());
-
-        const content = if (accumulated.items.len > 0)
-            try allocator.dupe(u8, accumulated.items)
-        else
-            null;
-
-        if (stream_usage.prompt_tokens == 0 and stream_usage.completion_tokens == 0 and stream_usage.total_tokens == 0) {
-            stream_usage.completion_tokens = @intCast((accumulated.items.len + 3) / 4);
-            stream_usage.total_tokens = stream_usage.completion_tokens;
-        } else {
-            normalizeTokenUsage(&stream_usage);
-        }
-
-        return .{
-            .content = content,
-            .usage = stream_usage,
-            .model = "",
-        };
+        return finalizeGeminiStreamResult(allocator, accumulated.items, stream_usage);
     }
 
     /// Create a Provider interface from this GeminiProvider.

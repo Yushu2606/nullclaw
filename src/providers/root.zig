@@ -254,6 +254,10 @@ pub const StreamChatResult = struct {
     model: []const u8 = "",
 };
 
+pub fn shouldRecoverPartialStream(accumulated_len: usize, saw_done: bool) bool {
+    return saw_done or accumulated_len > 0;
+}
+
 pub fn freeStreamUnusedChatResponseFields(allocator: std.mem.Allocator, response: *ChatResponse) void {
     for (response.tool_calls) |tc| {
         if (tc.id.len > 0) allocator.free(tc.id);
@@ -792,6 +796,18 @@ test "StreamChatResult defaults" {
     try std.testing.expect(result.usage.prompt_tokens == 0);
     try std.testing.expect(result.usage.completion_tokens == 0);
     try std.testing.expectEqualStrings("", result.model);
+}
+
+test "shouldRecoverPartialStream returns true after terminal event" {
+    try std.testing.expect(shouldRecoverPartialStream(0, true));
+}
+
+test "shouldRecoverPartialStream returns true after partial output" {
+    try std.testing.expect(shouldRecoverPartialStream(1, false));
+}
+
+test "shouldRecoverPartialStream returns false without output" {
+    try std.testing.expect(!shouldRecoverPartialStream(0, false));
 }
 
 test "emitChatResponseAsStream frees unused chat response fields" {
