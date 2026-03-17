@@ -105,6 +105,7 @@ const SerializedNamedAgentConfig = struct {
     provider: []const u8,
     model: []const u8,
     system_prompt: ?[]const u8 = null,
+    workspace_path: ?[]const u8 = null,
     api_key: ?[]const u8 = null,
     temperature: ?f64 = null,
     max_depth: u32 = 3,
@@ -117,6 +118,7 @@ fn freeNamedAgentSlice(allocator: std.mem.Allocator, agents: []const NamedAgentC
         allocator.free(agent_cfg.model);
         if (agent_cfg.system_prompt) |system_prompt| allocator.free(system_prompt);
         if (agent_cfg.system_prompt_path) |system_prompt_path| allocator.free(system_prompt_path);
+        if (agent_cfg.workspace_path) |workspace_path| allocator.free(workspace_path);
         if (agent_cfg.api_key) |api_key| allocator.free(api_key);
     }
     allocator.free(agents);
@@ -741,6 +743,7 @@ pub const Config = struct {
                             .provider = agent_cfg.provider,
                             .model = agent_cfg.model,
                             .system_prompt = agent_cfg.system_prompt_path orelse agent_cfg.system_prompt,
+                            .workspace_path = agent_cfg.workspace_path,
                             .api_key = agent_cfg.api_key,
                             .temperature = agent_cfg.temperature,
                             .max_depth = agent_cfg.max_depth,
@@ -1145,6 +1148,66 @@ pub const Config = struct {
             for (self.agents) |a| {
                 std.debug.print("            {s} → {s}/{s}\n", .{ a.name, a.provider, a.model });
             }
+        }
+    }
+
+    pub fn resolveAgentWorkspacePath(self: *const Config, allocator: std.mem.Allocator, workspace_path: []const u8) ![]const u8 {
+        if (std.fs.path.isAbsolute(workspace_path)) {
+            return try allocator.dupe(u8, workspace_path);
+        }
+        const home_dir = std.fs.path.dirname(self.config_path) orelse self.workspace_dir;
+        return try std.fs.path.join(allocator, &.{ home_dir, workspace_path });
+    }
+
+    pub fn resolveAgentWorkspace(self: *const Config, allocator: std.mem.Allocator, agent_name: []const u8) ![]const u8 {
+        for (self.agents) |agent_cfg| {
+            if (!std.mem.eql(u8, agent_cfg.name, agent_name)) continue;
+            if (agent_cfg.workspace_path) |workspace_path| {
+                return try self.resolveAgentWorkspacePath(allocator, workspace_path);
+            }
+            break;
+        }
+        return try allocator.dupe(u8, self.workspace_dir);
+    }
+
+    pub fn scaffoldAgentWorkspace(allocator: std.mem.Allocator, workspace_path: []const u8) !void {
+        std.fs.cwd().makePath(workspace_path) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        const files = [_]struct {
+            name: []const u8,
+            content: []const u8,
+        }{
+            .{
+                .name = "AGENTS.md",
+                .content = "# Agent Instructions\n\nDefine this agent's operating rules, workflow, and guardrails here.\n",
+            },
+            .{
+                .name = "SOUL.md",
+                .content = "# Soul\n\nDefine this agent's persona, tone, and communication style here.\n",
+            },
+            .{
+                .name = "IDENTITY.md",
+                .content = "# Identity\n\nDefine this agent's name, role, and purpose here.\n",
+            },
+            .{
+                .name = "MEMORY.md",
+                .content = "# Memory\n\nKeep durable notes for this agent here.\n",
+            },
+        };
+
+        for (files) |file_spec| {
+            const path = try std.fs.path.join(allocator, &.{ workspace_path, file_spec.name });
+            defer allocator.free(path);
+
+            const file = std.fs.createFileAbsolute(path, .{ .exclusive = true }) catch |err| switch (err) {
+                error.PathAlreadyExists => continue,
+                else => return err,
+            };
+            defer file.close();
+            try file.writeAll(file_spec.content);
         }
     }
 };
@@ -3351,6 +3414,49 @@ test "parse agents.list primary model ref without provider field" {
     try std.testing.expectEqualStrings("coder", cfg.agents[0].name);
     try std.testing.expectEqualStrings("ollama", cfg.agents[0].provider);
     try std.testing.expectEqualStrings("qwen3.5:cloud", cfg.agents[0].model);
+}
+
+test "parse agents.list with workspace_path" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"agents": {"list": [{"name": "coder", "provider": "openai", "model": "gpt-5.2", "workspace_path": "agents/coder"}]}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    defer freeNamedAgentSlice(allocator, cfg.agents);
+
+    try std.testing.expectEqual(@as(usize, 1), cfg.agents.len);
+    try std.testing.expectEqualStrings("agents/coder", cfg.agents[0].workspace_path.?);
+}
+
+test "resolveAgentWorkspace resolves relative path against config directory" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.json", .{base});
+    defer allocator.free(config_path);
+    const expected_workspace = try std.fmt.allocPrint(allocator, "{s}/agents/coder", .{base});
+    defer allocator.free(expected_workspace);
+
+    const agents = [_]NamedAgentConfig{.{
+        .name = "coder",
+        .provider = "openai",
+        .model = "gpt-5.2",
+        .workspace_path = "agents/coder",
+    }};
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+        .agents = &agents,
+    };
+
+    const resolved = try cfg.resolveAgentWorkspace(allocator, "coder");
+    defer allocator.free(resolved);
+    try std.testing.expectEqualStrings(expected_workspace, resolved);
 }
 
 test "parse agents object-of-objects shape" {

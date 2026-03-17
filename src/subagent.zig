@@ -92,6 +92,7 @@ pub const SubagentManager = struct {
     default_provider: []const u8,
     default_model: ?[]const u8,
     workspace_dir: []const u8,
+    config_path: []const u8,
     allowed_paths: []const []const u8,
     agents: []const config_mod.NamedAgentConfig,
     autonomy: config_types.AutonomyLevel,
@@ -126,6 +127,7 @@ pub const SubagentManager = struct {
             .default_provider = cfg.default_provider,
             .default_model = cfg.default_model,
             .workspace_dir = cfg.workspace_dir,
+            .config_path = cfg.config_path,
             .allowed_paths = cfg.autonomy.allowed_paths,
             .agents = cfg.agents,
             .autonomy = cfg.autonomy.level,
@@ -329,6 +331,19 @@ pub const SubagentManager = struct {
     }
 };
 
+fn resolveWorkspacePath(
+    allocator: Allocator,
+    workspace_path: []const u8,
+    config_path: []const u8,
+    fallback_workspace: []const u8,
+) ?[]const u8 {
+    if (std.fs.path.isAbsolute(workspace_path)) {
+        return allocator.dupe(u8, workspace_path) catch null;
+    }
+    const home_dir = std.fs.path.dirname(config_path) orelse fallback_workspace;
+    return std.fs.path.join(allocator, &.{ home_dir, workspace_path }) catch null;
+}
+
 // ── Thread function ─────────────────────────────────────────────
 
 fn subagentThreadFn(ctx: *ThreadContext) void {
@@ -352,6 +367,9 @@ fn subagentThreadFn(ctx: *ThreadContext) void {
     var default_provider = ctx.manager.default_provider;
     var default_model = ctx.manager.default_model;
     var temperature: f64 = 0.7;
+    var effective_workspace = ctx.manager.workspace_dir;
+    var resolved_workspace: ?[]const u8 = null;
+    defer if (resolved_workspace) |workspace_dir| ctx.manager.allocator.free(workspace_dir);
 
     if (ctx.agent_name) |agent_name| {
         const agent_cfg = ctx.manager.findAgent(agent_name) orelse {
@@ -364,6 +382,18 @@ fn subagentThreadFn(ctx: *ThreadContext) void {
         api_key = agent_cfg.api_key orelse ctx.manager.api_key;
         if (agent_cfg.system_prompt) |sp| system_prompt = sp;
         if (agent_cfg.temperature) |t| temperature = t;
+        if (agent_cfg.workspace_path) |workspace_path| {
+            resolved_workspace = resolveWorkspacePath(
+                ctx.manager.allocator,
+                workspace_path,
+                ctx.manager.config_path,
+                ctx.manager.workspace_dir,
+            );
+            if (resolved_workspace) |workspace_dir| {
+                config_mod.Config.scaffoldAgentWorkspace(ctx.manager.allocator, workspace_dir) catch {};
+                effective_workspace = workspace_dir;
+            }
+        }
     }
 
     if (ctx.manager.task_runner) |runner| {
@@ -374,7 +404,7 @@ fn subagentThreadFn(ctx: *ThreadContext) void {
             .default_provider = default_provider,
             .default_model = default_model,
             .temperature = temperature,
-            .workspace_dir = ctx.manager.workspace_dir,
+            .workspace_dir = effective_workspace,
             .allowed_paths = ctx.manager.allowed_paths,
             .http_enabled = ctx.manager.http_enabled,
             .http_allowed_domains = ctx.manager.http_allowed_domains,
@@ -441,6 +471,10 @@ fn waitTaskTerminalStatus(manager: *SubagentManager, task_id: u64) !TaskStatus {
 fn testTaskRunnerOk(allocator: Allocator, request: TaskRunRequest) ![]const u8 {
     _ = request;
     return allocator.dupe(u8, "runner-ok");
+}
+
+fn testTaskRunnerWorkspace(allocator: Allocator, request: TaskRunRequest) ![]const u8 {
+    return allocator.dupe(u8, request.workspace_dir);
 }
 
 fn testTaskRunnerFail(_: Allocator, _: TaskRunRequest) ![]const u8 {
@@ -643,6 +677,39 @@ test "SubagentManager spawnWithAgent accepts configured agent" {
 
     const task_id = try mgr.spawnWithAgent("quick task", "session-check", "agent", "session:42", "researcher");
     try std.testing.expect(task_id > 0);
+}
+
+test "SubagentManager uses named agent workspace_path for task runner" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+    const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/config.json", .{base});
+    defer std.testing.allocator.free(config_path);
+    const expected_workspace = try std.fmt.allocPrint(std.testing.allocator, "{s}/agents/researcher", .{base});
+    defer std.testing.allocator.free(expected_workspace);
+
+    const agents = [_]config_mod.NamedAgentConfig{.{
+        .name = "researcher",
+        .provider = "openrouter",
+        .model = "anthropic/claude-sonnet-4",
+        .workspace_path = "agents/researcher",
+    }};
+    const cfg = config_mod.Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = std.testing.allocator,
+        .agents = &agents,
+    };
+    var mgr = SubagentManager.init(std.testing.allocator, &cfg, null, .{});
+    mgr.task_runner = testTaskRunnerWorkspace;
+    defer mgr.deinit();
+
+    const task_id = try mgr.spawnWithAgent("quick task", "workspace-check", "agent", "session:42", "researcher");
+    const status = try waitTaskTerminalStatus(&mgr, task_id);
+    try std.testing.expectEqual(TaskStatus.completed, status);
+    try std.testing.expectEqualStrings(expected_workspace, mgr.getTaskResult(task_id).?);
 }
 
 test "SubagentManager uses task runner callback result" {

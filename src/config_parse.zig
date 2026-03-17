@@ -41,6 +41,7 @@ fn freeNamedAgentConfig(allocator: std.mem.Allocator, agent_cfg: *types.NamedAge
     allocator.free(agent_cfg.model);
     if (agent_cfg.system_prompt) |system_prompt| allocator.free(system_prompt);
     if (agent_cfg.system_prompt_path) |system_prompt_path| allocator.free(system_prompt_path);
+    if (agent_cfg.workspace_path) |workspace_path| allocator.free(workspace_path);
     if (agent_cfg.api_key) |api_key| allocator.free(api_key);
 }
 
@@ -167,6 +168,9 @@ fn parseNamedAgentObject(
     }
     if (item.object.get("api_key")) |ak| {
         if (ak == .string) agent_cfg.api_key = try allocator.dupe(u8, ak.string);
+    }
+    if (item.object.get("workspace_path")) |wp| {
+        if (wp == .string) agent_cfg.workspace_path = try allocator.dupe(u8, wp.string);
     }
     if (item.object.get("temperature")) |t| {
         if (t == .float) agent_cfg.temperature = t.float;

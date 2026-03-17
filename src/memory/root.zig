@@ -414,8 +414,10 @@ pub const Memory = struct {
         store: *const fn (ptr: *anyopaque, key: []const u8, content: []const u8, category: MemoryCategory, session_id: ?[]const u8) anyerror!void,
         recall: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, query: []const u8, limit: usize, session_id: ?[]const u8) anyerror![]MemoryEntry,
         get: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, key: []const u8) anyerror!?MemoryEntry,
+        getScoped: ?*const fn (ptr: *anyopaque, allocator: std.mem.Allocator, key: []const u8, session_id: ?[]const u8) anyerror!?MemoryEntry = null,
         list: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, category: ?MemoryCategory, session_id: ?[]const u8) anyerror![]MemoryEntry,
         forget: *const fn (ptr: *anyopaque, key: []const u8) anyerror!bool,
+        forgetScoped: ?*const fn (ptr: *anyopaque, key: []const u8, session_id: ?[]const u8) anyerror!bool = null,
         count: *const fn (ptr: *anyopaque) anyerror!usize,
         healthCheck: *const fn (ptr: *anyopaque) bool,
         deinit: *const fn (ptr: *anyopaque) void,
@@ -437,11 +439,40 @@ pub const Memory = struct {
         return self.vtable.get(self.ptr, allocator, key);
     }
 
+    pub fn getScoped(self: Memory, allocator: std.mem.Allocator, key: []const u8, session_id: ?[]const u8) !?MemoryEntry {
+        if (self.vtable.getScoped) |func| {
+            return func(self.ptr, allocator, key, session_id);
+        }
+
+        const entry = try self.vtable.get(self.ptr, allocator, key);
+        if (session_id == null or entry == null) return entry;
+
+        errdefer if (entry) |value| value.deinit(allocator);
+        if (entry.?.session_id) |entry_session_id| {
+            if (std.mem.eql(u8, entry_session_id, session_id.?)) return entry;
+        }
+        entry.?.deinit(allocator);
+        return null;
+    }
+
     pub fn list(self: Memory, allocator: std.mem.Allocator, category: ?MemoryCategory, session_id: ?[]const u8) ![]MemoryEntry {
         return self.vtable.list(self.ptr, allocator, category, session_id);
     }
 
     pub fn forget(self: Memory, key: []const u8) !bool {
+        return self.vtable.forget(self.ptr, key);
+    }
+
+    pub fn forgetScoped(self: Memory, allocator: std.mem.Allocator, key: []const u8, session_id: ?[]const u8) !bool {
+        if (self.vtable.forgetScoped) |func| {
+            return func(self.ptr, key, session_id);
+        }
+
+        if (session_id) |scoped_session_id| {
+            const entry = try self.getScoped(allocator, key, scoped_session_id);
+            defer if (entry) |value| value.deinit(allocator);
+            if (entry == null) return false;
+        }
         return self.vtable.forget(self.ptr, key);
     }
 

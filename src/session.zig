@@ -128,6 +128,7 @@ pub const Session = struct {
     agent: Agent,
     provider_holder: ?providers.ProviderHolder = null,
     owned_provider_api_key: ?[]u8 = null,
+    owned_memory_session_id: ?[]u8 = null,
     created_at: i64,
     last_active: i64,
     last_consolidated: u64 = 0,
@@ -140,6 +141,7 @@ pub const Session = struct {
         self.agent.deinit();
         if (self.provider_holder) |*holder| holder.deinit();
         if (self.owned_provider_api_key) |key| allocator.free(key);
+        if (self.owned_memory_session_id) |sid| allocator.free(sid);
         allocator.free(self.session_key);
     }
 };
@@ -263,6 +265,16 @@ pub const SessionManager = struct {
         agent.response_cache = self.response_cache;
         agent.mem_rt = self.mem_rt;
         agent.memory_session_id = owned_key;
+        var owned_memory_session_id: ?[]u8 = null;
+        errdefer if (owned_memory_session_id) |sid| self.allocator.free(sid);
+        if (agent_profile) |profile| {
+            if (profile.workspace_path != null) {
+                if (sessionAgentId(session_key)) |agent_id| {
+                    owned_memory_session_id = try std.fmt.allocPrint(self.allocator, "agent:{s}", .{agent_id});
+                    agent.memory_session_id = owned_memory_session_id.?;
+                }
+            }
+        }
         if (self.config.diagnostics.token_usage_ledger_enabled) {
             agent.usage_record_callback = usageRecordForwarder;
             agent.usage_record_ctx = @ptrCast(self);
@@ -274,6 +286,7 @@ pub const SessionManager = struct {
             .agent = agent,
             .provider_holder = session_provider_holder,
             .owned_provider_api_key = session_owned_provider_api_key,
+            .owned_memory_session_id = owned_memory_session_id,
             .created_at = std.time.timestamp(),
             .last_active = std.time.timestamp(),
             .last_consolidated = 0,
@@ -713,11 +726,15 @@ pub const SessionManager = struct {
             const old_key = session.session_key;
 
             session.session_key = new_key;
-            session.agent.memory_session_id = session.session_key;
+            if (session.owned_memory_session_id == null) {
+                session.agent.memory_session_id = session.session_key;
+            }
 
             self.sessions.put(self.allocator, session.session_key, session) catch {
                 session.session_key = old_key;
-                session.agent.memory_session_id = session.session_key;
+                if (session.owned_memory_session_id == null) {
+                    session.agent.memory_session_id = session.session_key;
+                }
                 self.sessions.put(self.allocator, old_key, session) catch {
                     log.err("failed to restore live session after canonical key migration rollback", .{});
                 };
@@ -764,6 +781,7 @@ pub const SessionManager = struct {
 
         for (legacy_entries) |entry| {
             mem.store(entry.key, entry.content, entry.category, canonical_session_key) catch return;
+            _ = mem.forgetScoped(self.allocator, entry.key, legacy_session_key) catch return;
         }
     }
 
@@ -1432,6 +1450,39 @@ test "getOrCreate stores named agent provider interface from session-owned holde
     const holder_provider = holder.provider();
     try testing.expect(session.agent.provider.ptr == holder_provider.ptr);
     try testing.expect(session.agent.provider.vtable == holder_provider.vtable);
+}
+
+test "getOrCreate uses named agent workspace namespace when workspace_path is set" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+    const config_path = try std.fmt.allocPrint(testing.allocator, "{s}/config.json", .{base});
+    defer testing.allocator.free(config_path);
+    const expected_workspace = try std.fmt.allocPrint(testing.allocator, "{s}/agents/coder-agent", .{base});
+    defer testing.allocator.free(expected_workspace);
+
+    var mock = MockProvider{ .response = "ok" };
+    var cfg = testConfig();
+    cfg.workspace_dir = base;
+    cfg.config_path = config_path;
+    cfg.agents = &.{
+        .{
+            .name = "Coder Agent",
+            .provider = "ollama",
+            .model = "qwen2.5-coder:14b",
+            .workspace_path = "agents/coder-agent",
+        },
+    };
+
+    var sm = testSessionManager(testing.allocator, &mock, &cfg);
+    defer sm.deinit();
+
+    const session = try sm.getOrCreate("agent:coder-agent:telegram:group:-100123");
+    try testing.expect(session.owned_memory_session_id != null);
+    try testing.expectEqualStrings("agent:coder-agent", session.agent.memory_session_id.?);
+    try testing.expectEqualStrings(expected_workspace, session.agent.workspace_dir);
 }
 
 test "getOrCreate falls back to default config for unknown routed agent id" {
