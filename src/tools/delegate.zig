@@ -208,6 +208,7 @@ pub const DelegateTool = struct {
             // If a named agent config with a provider entry is used the field
             // will be threaded through via the agent config resolution above.
             null,
+            false,
         );
         defer provider_holder.deinit();
         return provider_holder.provider().chatWithSystem(

@@ -70,6 +70,7 @@ pub fn runTaskWithTools(
         provider_user_agent,
         provider_api_mode,
         provider_max_streaming_prompt_bytes,
+        if (provider_entry) |entry| entry.chat_template_enable_thinking_param else false,
     );
     defer provider_holder.deinit();
 
