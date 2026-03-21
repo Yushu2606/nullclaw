@@ -89,7 +89,7 @@ pub const MarkdownMemory = struct {
         }
         const era = if (y >= 0) @divTrunc(y, 400) else @divTrunc(y - 399, 400);
         const yoe = @as(u32, @intCast(y - era * 400)); // [0, 399]
-        const doy = (153 * (m - 3) + 2) / 5 + @as(u32, @intCast(day)) - 1; // [0, 365]
+        const doy = @as(u32, @intCast(@divTrunc(153 * (m - 3) + 2, 5))) + @as(u32, @intCast(day)) - 1; // [0, 365]
         const doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
         const days = era * 146097 + @as(i64, @intCast(doe)) - 719468;
         return days;
@@ -270,7 +270,7 @@ pub const MarkdownMemory = struct {
                 if (parsed != 0) {
                     break :blk parsed;
                 } else {
-                    break :blk @as(i64, @intCast(stat.mtime / std.time.ns_per_s));
+                    break :blk @as(i64, @intCast(@divTrunc(stat.mtime, std.time.ns_per_s)));
                 }
             };
 
@@ -302,7 +302,7 @@ pub const MarkdownMemory = struct {
                     if (parsed != 0) {
                         break :blk parsed;
                     } else {
-                        break :blk @as(i64, @intCast(stat.mtime / std.time.ns_per_s));
+                        break :blk @as(i64, @intCast(@divTrunc(stat.mtime, std.time.ns_per_s)));
                     }
                 };
 
