@@ -969,7 +969,7 @@ const DebouncedInboundPollResult = enum {
 };
 
 fn pollDebouncedInbound(
-    allocator: std.mem.Allocator,
+    _: std.mem.Allocator,
     event_bus: *bus_mod.Bus,
     debouncer: *inbound_debounce.InboundDebouncer,
     ready_messages: *std.ArrayListUnmanaged(bus_mod.InboundMessage),
@@ -986,7 +986,6 @@ fn pollDebouncedInbound(
     if (maybe_msg) |msg| {
         debouncer.push(msg, inbound_debounce.nowMs(), ready_messages) catch |push_err| {
             log.warn("inbound debounce push failed: {}", .{push_err});
-            msg.deinit(allocator);
         };
         return if (ready_messages.items.len > 0) .ready else .idle;
     }
@@ -1506,6 +1505,46 @@ test "pollDebouncedInbound keeps dispatcher alive across idle timeout" {
     }
 
     // Regression: debounced idle polls must not terminate the inbound dispatcher.
+    try std.testing.expectEqual(
+        DebouncedInboundPollResult.idle,
+        pollDebouncedInbound(allocator, &event_bus, &debouncer, &ready_messages),
+    );
+    try std.testing.expectEqual(@as(usize, 0), ready_messages.items.len);
+}
+
+test "pollDebouncedInbound merge out-of-memory does not double free" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+
+    var event_bus = bus_mod.Bus.init();
+    defer event_bus.close();
+
+    var debouncer = inbound_debounce.InboundDebouncer.init(allocator, 3000);
+    defer debouncer.deinit();
+
+    var ready_messages: std.ArrayListUnmanaged(bus_mod.InboundMessage) = .empty;
+    defer {
+        for (ready_messages.items) |msg| msg.deinit(allocator);
+        ready_messages.deinit(allocator);
+    }
+
+    try debouncer.push(
+        try bus_mod.makeInbound(allocator, "discord", "u1", "c1", "hello", "discord:c1"),
+        1_000,
+        &ready_messages,
+    );
+    try event_bus.publishInbound(try bus_mod.makeInbound(
+        allocator,
+        "discord",
+        "u1",
+        "c1",
+        "world",
+        "discord:c1",
+    ));
+
+    failing.fail_index = failing.alloc_index;
+
+    // Regression: merge allocation failure must not double-free the consumed bus message.
     try std.testing.expectEqual(
         DebouncedInboundPollResult.idle,
         pollDebouncedInbound(allocator, &event_bus, &debouncer, &ready_messages),
