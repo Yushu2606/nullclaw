@@ -126,14 +126,17 @@ pub const GeminiCliProvider = struct {
         self.resetConnectionState();
     }
 
-    fn cleanupStartupFailure(self: *GeminiCliProvider, child: *std.process.Child, child_spawned: bool) void {
-        if (child_spawned) {
-            self.child = child;
-            self.stopInternal();
-            return;
+    fn cleanupStartupFailure(self: *GeminiCliProvider, child: ?*std.process.Child, child_spawned: bool) void {
+        if (child) |allocated_child| {
+            if (child_spawned) {
+                self.child = allocated_child;
+                self.stopInternal();
+                return;
+            }
+
+            self.allocator.destroy(allocated_child);
         }
 
-        self.allocator.destroy(child);
         self.child = null;
         self.resetConnectionState();
     }
@@ -175,17 +178,18 @@ pub const GeminiCliProvider = struct {
         try argv_list.append(self.allocator, try self.allocator.dupe(u8, "yolo"));
         self.child_argv = try argv_list.toOwnedSlice(self.allocator);
 
-        const child = try self.allocator.create(std.process.Child);
+        var child: ?*std.process.Child = null;
         var child_spawned = false;
         errdefer self.cleanupStartupFailure(child, child_spawned);
-        child.* = std.process.Child.init(self.child_argv.?, self.allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Inherit;
+        child = try self.allocator.create(std.process.Child);
+        child.?.* = std.process.Child.init(self.child_argv.?, self.allocator);
+        child.?.stdin_behavior = .Pipe;
+        child.?.stdout_behavior = .Pipe;
+        child.?.stderr_behavior = .Inherit;
 
-        try child.spawn();
+        try child.?.spawn();
         child_spawned = true;
-        self.child = child;
+        self.child = child.?;
         const pid: i64 = if (builtin.os.tag == .windows) @intCast(@intFromPtr(self.child.?.id)) else self.child.?.id;
         log.debug("process spawned (pid={d})", .{pid});
 
@@ -325,8 +329,7 @@ pub const GeminiCliProvider = struct {
         }, .{});
         defer allocator.free(msg);
 
-        try self.child.?.stdin.?.writeAll(msg);
-        try self.child.?.stdin.?.writeAll("\n");
+        try self.sendJsonRpcLine(msg);
 
         // Accumulate output
         var result_buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -362,42 +365,35 @@ pub const GeminiCliProvider = struct {
             }
 
             // Final result response
-            if (obj.get("id")) |resp_id| {
-                const id_match = switch (resp_id) {
-                    .integer => |vid| vid == id,
-                    .float => |vid| @as(u32, @intFromFloat(vid)) == id,
-                    else => false,
-                };
-                if (id_match) {
-                    // This is our response
-                    if (obj.get("result")) |res| {
-                        if (res == .object) {
-                            if (res.object.get("content")) |c| {
-                                if (c == .string) {
-                                    if (c.string.len > 0) {
-                                        result_buf.clearRetainingCapacity();
-                                        try result_buf.appendSlice(allocator, c.string);
-                                    }
-                                }
+            if (!responseIdMatches(obj.get("id"), id)) continue;
+
+            if (obj.get("result")) |res| {
+                if (res == .object) {
+                    if (res.object.get("content")) |c| {
+                        if (c == .string) {
+                            if (c.string.len > 0) {
+                                result_buf.clearRetainingCapacity();
+                                try result_buf.appendSlice(allocator, c.string);
                             }
                         }
-                    } else if (obj.get("error")) |err_val| {
-                        log.err("Gemini ACP prompt failed with error: {any}", .{err_val});
-
-                        // Record detailed error message if available
-                        if (err_val == .object) {
-                            if (err_val.object.get("message")) |err_msg_val| {
-                                if (err_msg_val == .string) {
-                                    root.setLastApiErrorDetail("gemini-cli", err_msg_val.string);
-                                }
-                            }
-                        }
-
-                        return error.ApiError;
                     }
-                    break;
                 }
+            } else if (obj.get("error")) |err_val| {
+                log.err("Gemini ACP prompt failed with error: {any}", .{err_val});
+
+                // Record detailed error message if available
+                if (err_val == .object) {
+                    if (err_val.object.get("message")) |err_msg_val| {
+                        if (err_msg_val == .string) {
+                            root.setLastApiErrorDetail("gemini-cli", err_msg_val.string);
+                        }
+                    }
+                }
+
+                return error.ApiError;
             }
+
+            break;
         }
 
         if (result_buf.items.len == 0) return error.NoResultInOutput;
@@ -524,10 +520,22 @@ fn buildSessionNewRequest(allocator: std.mem.Allocator, id: u32, cwd: []const u8
 fn responseIdMatches(resp_id: ?std.json.Value, id: u32) bool {
     const value = resp_id orelse return false;
     return switch (value) {
-        .integer => |vid| vid == id,
-        .float => |vid| @as(u32, @intFromFloat(vid)) == id,
+        .integer => |vid| vid >= 0 and vid <= std.math.maxInt(u32) and @as(u32, @intCast(vid)) == id,
+        .float => |vid| floatResponseIdMatches(vid, id),
+        .string => |vid| blk: {
+            const parsed = std.fmt.parseUnsigned(u32, vid, 10) catch break :blk false;
+            break :blk parsed == id;
+        },
         else => false,
     };
+}
+
+fn floatResponseIdMatches(resp_id: f64, id: u32) bool {
+    if (!std.math.isFinite(resp_id)) return false;
+    if (resp_id < 0) return false;
+    if (resp_id > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return false;
+    if (@floor(resp_id) != resp_id) return false;
+    return @as(u32, @intFromFloat(resp_id)) == id;
 }
 
 fn recordJsonRpcError(prefix: []const u8, line: []const u8, err_val: ?std.json.Value) void {
@@ -712,6 +720,13 @@ test "responseIdMatches handles integer ids" {
     try std.testing.expect(!responseIdMatches(null, 42));
 }
 
+test "responseIdMatches accepts numeric float and string ids" {
+    try std.testing.expect(responseIdMatches(.{ .float = 42.0 }, 42));
+    try std.testing.expect(!responseIdMatches(.{ .float = 42.5 }, 42));
+    try std.testing.expect(responseIdMatches(.{ .string = "42" }, 42));
+    try std.testing.expect(!responseIdMatches(.{ .string = "forty-two" }, 42));
+}
+
 test "cleanupStartupFailure clears provider state" {
     var provider = GeminiCliProvider{
         .allocator = std.testing.allocator,
@@ -733,6 +748,31 @@ test "cleanupStartupFailure clears provider state" {
     // Regression: handshake failures in ensureStarted() must not leave provider
     // state pointing at a freed child or stale argv/session data.
     provider.cleanupStartupFailure(child, false);
+
+    try std.testing.expect(provider.child == null);
+    try std.testing.expect(provider.child_argv == null);
+    try std.testing.expect(provider.session_id == null);
+    try std.testing.expectEqual(@as(usize, 0), provider.read_buffer.items.len);
+    try std.testing.expectEqual(@as(usize, 0), provider.read_offset);
+}
+
+test "cleanupStartupFailure clears provider state before child allocation" {
+    var provider = GeminiCliProvider{
+        .allocator = std.testing.allocator,
+        .model = GeminiCliProvider.DEFAULT_MODEL,
+    };
+    defer provider.read_buffer.deinit(std.testing.allocator);
+
+    provider.child_argv = try std.testing.allocator.alloc([]const u8, 2);
+    provider.child_argv.?[0] = try std.testing.allocator.dupe(u8, "gemini");
+    provider.child_argv.?[1] = try std.testing.allocator.dupe(u8, "--experimental-acp");
+    provider.session_id = try std.testing.allocator.dupe(u8, "session-123");
+    try provider.read_buffer.appendSlice(std.testing.allocator, "partial");
+    provider.read_offset = 3;
+
+    // Regression: allocation failures after taking ownership of child_argv but
+    // before creating the Child must still release all startup state.
+    provider.cleanupStartupFailure(null, false);
 
     try std.testing.expect(provider.child == null);
     try std.testing.expect(provider.child_argv == null);
