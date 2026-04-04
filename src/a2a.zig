@@ -383,7 +383,7 @@ pub const A2aResponse = struct {
 
 /// Build the A2A agent card JSON response.
 /// vision_capable: probe result from SessionManager.probeVision(); null = not confirmed.
-/// The effective multi_modal flag is: vision_capable if set, else cfg.a2a.multi_modal (manual override).
+/// Operators may still force advertising via cfg.a2a.multi_modal when needed.
 pub fn handleAgentCard(allocator: std.mem.Allocator, cfg: *const Config, vision_capable: ?bool) A2aResponse {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -418,8 +418,7 @@ pub fn handleAgentCard(allocator: std.mem.Allocator, cfg: *const Config, vision_
         w.writeAll("https://github.com/nullclaw/nullclaw") catch return errorResponse();
     }
     w.writeAll("\"}") catch return errorResponse();
-    // multi_modal: live probe result takes precedence; fall back to manual config flag.
-    const effective_multi_modal = vision_capable orelse cfg.a2a.multi_modal;
+    const effective_multi_modal = cfg.a2a.multi_modal or vision_capable == true;
     if (effective_multi_modal) {
         w.writeAll(",\"capabilities\":{\"streaming\":true,\"multi_modal\":true}") catch return errorResponse();
     } else {
@@ -1316,14 +1315,6 @@ fn extractArrayObjectStringField(array_json: []const u8, key: []const u8) ?[]con
     }
 }
 
-/// Extract the user's message text from A2A params.message.parts[0].text.
-fn extractMessageText(body: []const u8) ?[]const u8 {
-    const params = extractParamsObject(body) orelse return null;
-    const message = extractObjectObjectField(params, "message") orelse return null;
-    const parts = extractObjectArrayField(message, "parts") orelse return null;
-    return extractArrayObjectStringField(parts, "text");
-}
-
 /// Extract message content from all A2A parts, combining text parts and converting
 /// inlineData parts to [IMAGE:data:mime;base64,...] markers understood by the multimodal
 /// pipeline. Returns an allocated string the caller must free; returns null only when
@@ -1753,12 +1744,12 @@ test "handleAgentCard vision_capable=true overrides cfg.multi_modal=false" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "\"multi_modal\":true") != null);
 }
 
-test "handleAgentCard vision_capable=false overrides cfg.multi_modal=true" {
+test "handleAgentCard manual multi_modal=true overrides probe result false" {
     var cfg = testConfig();
     cfg.a2a.multi_modal = true;
     const resp = handleAgentCard(testing.allocator, &cfg, false);
     defer if (resp.allocated) testing.allocator.free(resp.body);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "\"multi_modal\"") == null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "\"multi_modal\":true") != null);
 }
 
 test "handleAgentCard vision_capable=null falls back to cfg.multi_modal=true" {
@@ -1882,22 +1873,6 @@ test "buildTaskJson escapes special characters" {
 
     try testing.expect(std.mem.indexOf(u8, json, "hello \\\"world\\\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "line1\\nline2\\ttab") != null);
-}
-
-test "extractMessageText finds text in parts" {
-    const body =
-        \\{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"messageId":"msg-1","role":"user","parts":[{"type":"text","text":"Hello there"}]}}}
-    ;
-    const text = extractMessageText(body);
-    try testing.expect(text != null);
-    try testing.expectEqualStrings("Hello there", text.?);
-}
-
-test "extractMessageText returns null for missing parts" {
-    const body =
-        \\{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user"}}}
-    ;
-    try testing.expect(extractMessageText(body) == null);
 }
 
 test "extractMessageContent returns text-only message unchanged" {
