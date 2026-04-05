@@ -11,9 +11,9 @@ pub const CalculatorTool = struct {
     const MIN_FIXED_NOTATION_ABS: f64 = 0.000001;
 
     pub const tool_name = "calculator";
-    pub const tool_description = "Perform mathematical calculations accurately. Supports arithmetic (add, subtract, multiply, divide, pow, sqrt), logarithms (log, ln, exp), rounding (abs, floor, ceil, round), and statistics (average, median, stdev, min, max, count, percentile).";
+    pub const tool_description = "Perform mathematical calculations accurately. Supports arithmetic (add, subtract, multiply, divide, mod, pow, sqrt), logarithms (log, log_base, ln, exp), rounding (abs, floor, ceil, round), and statistics (average, median, variance as population variance, stdev_population, stdev_sample, min, max, count, percentile).";
     pub const tool_params =
-        \\{"type":"object","properties":{"operation":{"type":"string","enum":["add","subtract","multiply","divide","pow","sqrt","log","ln","exp","average","median","stdev","min","max","count","percentile","abs","floor","ceil","round"],"description":"Calculation operation to perform"},"values":{"type":"array","items":{"type":"number"},"description":"Numeric values for the calculation"},"percentile_rank":{"type":"integer","description":"Percentile rank 0-100, required for percentile operation"}},"required":["operation","values"]}
+        \\{"type":"object","properties":{"operation":{"type":"string","enum":["add","subtract","multiply","divide","mod","pow","sqrt","log","log_base","ln","exp","average","median","variance","stdev_population","stdev_sample","min","max","count","percentile","abs","floor","ceil","round"],"description":"Calculation operation to perform"},"values":{"type":"array","items":{"type":"number"},"description":"Numeric values for the calculation. For ordered operations use left-to-right input order; log_base expects [value, base]."},"percentile_rank":{"type":"integer","description":"Percentile rank 0-100, required for percentile operation"}},"required":["operation","values"]}
     ;
 
     pub const vtable = root.ToolVTable(@This());
@@ -99,6 +99,11 @@ pub const CalculatorTool = struct {
             if (values[1] == 0.0) return error.DivisionByZero;
             return formatResult(allocator, values[0] / values[1]);
         }
+        if (std.mem.eql(u8, operation, "mod")) {
+            if (values.len != 2) return error.ModRequiresTwoValues;
+            if (values[1] == 0.0) return error.ModuloByZero;
+            return formatResult(allocator, @mod(values[0], values[1]));
+        }
         if (std.mem.eql(u8, operation, "pow")) {
             if (values.len != 2) return error.PowRequiresTwoValues;
             return formatResult(allocator, std.math.pow(f64, values[0], values[1]));
@@ -112,6 +117,13 @@ pub const CalculatorTool = struct {
             if (values.len != 1) return error.LogRequiresOneValue;
             if (values[0] <= 0.0) return error.LogRequiresPositiveValue;
             return formatResult(allocator, std.math.log10(values[0]));
+        }
+        if (std.mem.eql(u8, operation, "log_base")) {
+            if (values.len != 2) return error.LogBaseRequiresTwoValues;
+            if (values[0] <= 0.0) return error.LogBaseRequiresPositiveValue;
+            if (values[1] <= 0.0) return error.LogBaseInvalidBase;
+            if (values[1] == 1.0) return error.LogBaseInvalidBase;
+            return formatResult(allocator, @log(values[0]) / @log(values[1]));
         }
         if (std.mem.eql(u8, operation, "ln")) {
             if (values.len != 1) return error.LnRequiresOneValue;
@@ -132,9 +144,17 @@ pub const CalculatorTool = struct {
             if (values.len < 1) return error.MedianRequiresValues;
             return formatResult(allocator, median(values));
         }
-        if (std.mem.eql(u8, operation, "stdev")) {
-            if (values.len < 2) return error.StdevRequiresTwoValues;
+        if (std.mem.eql(u8, operation, "variance")) {
+            if (values.len < 1) return error.VarianceRequiresValues;
+            return formatResult(allocator, populationVariance(values));
+        }
+        if (std.mem.eql(u8, operation, "stdev_population")) {
+            if (values.len < 1) return error.StdevPopulationRequiresValues;
             return formatResult(allocator, populationStdev(values));
+        }
+        if (std.mem.eql(u8, operation, "stdev_sample")) {
+            if (values.len < 2) return error.StdevSampleRequiresTwoValues;
+            return formatResult(allocator, sampleStdev(values));
         }
         if (std.mem.eql(u8, operation, "min")) {
             if (values.len < 1) return error.MinRequiresValues;
@@ -195,17 +215,40 @@ pub const CalculatorTool = struct {
         return (values[n / 2 - 1] + values[n / 2]) / 2.0;
     }
 
-    fn populationStdev(values: []const f64) f64 {
+    fn populationVariance(values: []const f64) f64 {
         const n: f64 = @floatFromInt(values.len);
-        var sum: f64 = 0.0;
-        for (values) |v| sum += v;
-        const mean = sum / n;
+        const mean = averageValue(values);
         var sq_diff_sum: f64 = 0.0;
         for (values) |v| {
             const diff = v - mean;
             sq_diff_sum += diff * diff;
         }
-        return @sqrt(sq_diff_sum / n);
+        return sq_diff_sum / n;
+    }
+
+    fn sampleVariance(values: []const f64) f64 {
+        const n: f64 = @floatFromInt(values.len);
+        const mean = averageValue(values);
+        var sq_diff_sum: f64 = 0.0;
+        for (values) |v| {
+            const diff = v - mean;
+            sq_diff_sum += diff * diff;
+        }
+        return sq_diff_sum / (n - 1.0);
+    }
+
+    fn populationStdev(values: []const f64) f64 {
+        return @sqrt(populationVariance(values));
+    }
+
+    fn sampleStdev(values: []const f64) f64 {
+        return @sqrt(sampleVariance(values));
+    }
+
+    fn averageValue(values: []const f64) f64 {
+        var sum: f64 = 0.0;
+        for (values) |v| sum += v;
+        return sum / @as(f64, @floatFromInt(values.len));
     }
 
     fn percentile(values: []f64, rank: f64) f64 {
@@ -372,6 +415,28 @@ test "calculator divide by zero" {
     try std.testing.expect(std.mem.indexOf(u8, result.output, "DivisionByZero") != null);
 }
 
+test "calculator mod" {
+    var ct = CalculatorTool{};
+    const t = ct.tool();
+    const parsed = try root.parseTestArgs("{\"operation\":\"mod\",\"values\":[10,3]}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer std.testing.allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("1", result.output);
+}
+
+test "calculator mod by zero" {
+    var ct = CalculatorTool{};
+    const t = ct.tool();
+    const parsed = try root.parseTestArgs("{\"operation\":\"mod\",\"values\":[10,0]}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer std.testing.allocator.free(result.output);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "ModuloByZero") != null);
+}
+
 test "calculator pow" {
     var ct = CalculatorTool{};
     const t = ct.tool();
@@ -413,6 +478,28 @@ test "calculator log" {
     defer std.testing.allocator.free(result.output);
     try std.testing.expect(result.success);
     try std.testing.expectEqualStrings("3", result.output);
+}
+
+test "calculator log base" {
+    var ct = CalculatorTool{};
+    const t = ct.tool();
+    const parsed = try root.parseTestArgs("{\"operation\":\"log_base\",\"values\":[64,2]}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer std.testing.allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("6", result.output);
+}
+
+test "calculator log base rejects invalid base" {
+    var ct = CalculatorTool{};
+    const t = ct.tool();
+    const parsed = try root.parseTestArgs("{\"operation\":\"log_base\",\"values\":[64,1]}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer std.testing.allocator.free(result.output);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "LogBaseInvalidBase") != null);
 }
 
 test "calculator ln" {
@@ -470,21 +557,54 @@ test "calculator median even count" {
     try std.testing.expectEqualStrings("2.5", result.output);
 }
 
-test "calculator stdev" {
+test "calculator variance" {
     var ct = CalculatorTool{};
     const t = ct.tool();
-    const parsed = try root.parseTestArgs("{\"operation\":\"stdev\",\"values\":[2,4,4,4,5,5,7,9]}");
+    const parsed = try root.parseTestArgs("{\"operation\":\"variance\",\"values\":[2,4,4,4,5,5,7,9]}");
     defer parsed.deinit();
     const result = try t.execute(std.testing.allocator, parsed.value.object);
     defer std.testing.allocator.free(result.output);
     try std.testing.expect(result.success);
-    try std.testing.expect(std.mem.indexOf(u8, result.output, "2") != null);
+    try std.testing.expectEqualStrings("4", result.output);
 }
 
-test "calculator stdev single value rejected" {
+test "calculator stdev population" {
     var ct = CalculatorTool{};
     const t = ct.tool();
-    const parsed = try root.parseTestArgs("{\"operation\":\"stdev\",\"values\":[42]}");
+    const parsed = try root.parseTestArgs("{\"operation\":\"stdev_population\",\"values\":[2,4,4,4,5,5,7,9]}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer std.testing.allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("2", result.output);
+}
+
+test "calculator stdev population single value" {
+    var ct = CalculatorTool{};
+    const t = ct.tool();
+    const parsed = try root.parseTestArgs("{\"operation\":\"stdev_population\",\"values\":[42]}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer std.testing.allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("0", result.output);
+}
+
+test "calculator stdev sample" {
+    var ct = CalculatorTool{};
+    const t = ct.tool();
+    const parsed = try root.parseTestArgs("{\"operation\":\"stdev_sample\",\"values\":[2,4,4,4,5,5,7,9]}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer std.testing.allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("2.13809", result.output);
+}
+
+test "calculator stdev sample single value rejected" {
+    var ct = CalculatorTool{};
+    const t = ct.tool();
+    const parsed = try root.parseTestArgs("{\"operation\":\"stdev_sample\",\"values\":[42]}");
     defer parsed.deinit();
     const result = try t.execute(std.testing.allocator, parsed.value.object);
     defer std.testing.allocator.free(result.output);
