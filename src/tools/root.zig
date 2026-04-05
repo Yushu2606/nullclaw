@@ -14,6 +14,17 @@ const SandboxBackend = @import("../security/sandbox.zig").SandboxBackend;
 const createSandbox = @import("../security/sandbox.zig").createSandbox;
 const ConfigSandboxBackend = @import("../config.zig").SandboxBackend;
 
+fn mapConfigSandboxBackend(backend: ConfigSandboxBackend) SandboxBackend {
+    return switch (backend) {
+        .auto => .auto,
+        .landlock => .landlock,
+        .firejail => .firejail,
+        .bubblewrap => .bubblewrap,
+        .docker => .docker,
+        .none => .none,
+    };
+}
+
 // ── JSON arg extraction helpers ─────────────────────────────────
 // Used by all tool implementations to extract typed fields from
 // the pre-parsed ObjectMap passed by the dispatcher.
@@ -61,17 +72,6 @@ pub fn getStringArray(args: JsonObjectMap, key: []const u8) ?[]const JsonValue {
 /// The caller must `defer parsed.deinit()` and extract `.value.object` for the ObjectMap.
 pub fn parseTestArgs(json_str: []const u8) !std.json.Parsed(JsonValue) {
     return std.json.parseFromSlice(JsonValue, std.testing.allocator, json_str, .{});
-}
-
-fn mapSandboxBackend(backend: ConfigSandboxBackend) SandboxBackend {
-    return switch (backend) {
-        .auto => .auto,
-        .landlock => .landlock,
-        .firejail => .firejail,
-        .bubblewrap => .bubblewrap,
-        .docker => .docker,
-        .none => .none,
-    };
 }
 
 threadlocal var tls_memory_session_id: ?[]const u8 = null;
@@ -328,7 +328,7 @@ pub fn allTools(
         bootstrap_provider: ?bootstrap_mod.BootstrapProvider = null,
         backend_name: []const u8 = "hybrid",
         sandbox_backend: ConfigSandboxBackend = .auto,
-        sandbox_enabled: bool = false,
+        sandbox_enabled: bool = true,
     },
 ) ![]Tool {
     var list: std.ArrayList(Tool) = .{};
@@ -353,8 +353,14 @@ pub fn allTools(
         // sandbox and sandbox_storage initialized below if enabled
     };
     if (opts.sandbox_enabled and comptime builtin.os.tag != .windows) {
-        const backend = mapSandboxBackend(opts.sandbox_backend);
-        st.sandbox = createSandbox(allocator, backend, workspace_dir, &st.sandbox_storage);
+        // Windows shells use cmd.exe/PowerShell, which Unix-oriented sandboxes
+        // cannot wrap without breaking command execution semantics.
+        st.sandbox = createSandbox(
+            allocator,
+            mapConfigSandboxBackend(opts.sandbox_backend),
+            workspace_dir,
+            &st.sandbox_storage,
+        );
     }
     try list.append(allocator, st.tool());
 
@@ -863,7 +869,9 @@ test "all tools excludes extras when disabled" {
     try std.testing.expectEqual(@as(usize, 16), tools.len);
 }
 
-test "all tools leaves shell sandbox disabled by default" {
+test "all tools wires shell sandbox by default" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
     const tools = try allTools(std.testing.allocator, "/tmp/yc_test", .{});
     defer deinitTools(std.testing.allocator, tools);
 
@@ -871,7 +879,7 @@ test "all tools leaves shell sandbox disabled by default" {
     for (tools) |t| {
         if (!std.mem.eql(u8, t.name(), "shell")) continue;
         const st: *shell.ShellTool = @ptrCast(@alignCast(t.ptr));
-        try std.testing.expect(st.sandbox == null);
+        try std.testing.expect(st.sandbox != null);
         saw_shell = true;
         break;
     }
@@ -896,25 +904,6 @@ test "all tools skips shell sandbox wiring on windows" {
     }
 
     return error.TestUnexpectedResult;
-}
-
-test "mapSandboxBackend preserves configured backend values" {
-    // Regression: config and runtime sandbox enums do not share the same ordinal order.
-    const cases = [_]struct {
-        config: ConfigSandboxBackend,
-        runtime: SandboxBackend,
-    }{
-        .{ .config = .auto, .runtime = .auto },
-        .{ .config = .landlock, .runtime = .landlock },
-        .{ .config = .firejail, .runtime = .firejail },
-        .{ .config = .bubblewrap, .runtime = .bubblewrap },
-        .{ .config = .docker, .runtime = .docker },
-        .{ .config = .none, .runtime = .none },
-    };
-
-    for (cases) |case| {
-        try std.testing.expectEqual(case.runtime, mapSandboxBackend(case.config));
-    }
 }
 
 test "all tools wires http and web_search config into tool instances" {
@@ -1125,6 +1114,25 @@ test "subagent tools wire bootstrap provider into file_read for sqlite backends"
     }
 
     try std.testing.expect(checked);
+}
+
+test "mapConfigSandboxBackend preserves configured backend values" {
+    // Regression: config and runtime sandbox enums do not share the same ordinal order.
+    const cases = [_]struct {
+        config: ConfigSandboxBackend,
+        runtime: SandboxBackend,
+    }{
+        .{ .config = .auto, .runtime = .auto },
+        .{ .config = .landlock, .runtime = .landlock },
+        .{ .config = .firejail, .runtime = .firejail },
+        .{ .config = .bubblewrap, .runtime = .bubblewrap },
+        .{ .config = .docker, .runtime = .docker },
+        .{ .config = .none, .runtime = .none },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectEqual(case.runtime, mapConfigSandboxBackend(case.config));
+    }
 }
 
 test "subagent tools wire http allowlist, response limit, and timeout" {

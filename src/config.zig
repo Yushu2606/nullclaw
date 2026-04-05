@@ -1,6 +1,6 @@
 const std = @import("std");
+const config_paths = @import("config_paths.zig");
 const fs_compat = @import("fs_compat.zig");
-const platform = @import("platform.zig");
 const provider_names = @import("provider_names.zig");
 const secrets = @import("security/secrets.zig");
 pub const config_types = @import("config_types.zig");
@@ -218,6 +218,11 @@ pub const Config = struct {
         return self.getProviderKey(self.default_provider);
     }
 
+    /// Sandbox defaults to enabled when the config leaves it unset.
+    pub fn sandboxEnabled(self: *const Config) bool {
+        return self.security.sandbox.enabled orelse true;
+    }
+
     fn sanitizeStatePathSegment(allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         errdefer buf.deinit(allocator);
@@ -372,15 +377,11 @@ pub const Config = struct {
         }
         const allocator = arena_ptr.allocator();
 
-        // NULLCLAW_HOME overrides the default config directory (~/.nullclaw/).
-        const config_dir = std.process.getEnvVarOwned(allocator, "NULLCLAW_HOME") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => blk: {
-                const home = platform.getHomeDir(allocator) catch return error.NoHomeDir;
-                break :blk try std.fs.path.join(allocator, &.{ home, ".nullclaw" });
-            },
+        const config_dir = config_paths.defaultConfigDir(allocator) catch |err| switch (err) {
+            error.HomeDirNotFound => return error.NoHomeDir,
             else => return err,
         };
-        const config_path = try std.fs.path.join(allocator, &.{ config_dir, "config.json" });
+        const config_path = try config_paths.pathFromConfigDir(allocator, config_dir, "config.json");
         const default_workspace_dir = try std.fs.path.join(allocator, &.{ config_dir, "workspace" });
 
         var cfg = Config{
@@ -1435,7 +1436,7 @@ pub const Config = struct {
                 .{},
             ),
             ValidationError.NoDefaultModel => std.debug.print(
-                "No default model configured. Set agents.defaults.model.primary in ~/.nullclaw/config.json or run `nullclaw onboard`.\n",
+                "No default model configured. Set agents.defaults.model.primary in config.json in your nullclaw config directory or run `nullclaw onboard`.\n",
                 .{},
             ),
             ValidationError.TemperatureOutOfRange => std.debug.print("Config error: temperature must be between 0.0 and 2.0.\n", .{}),
@@ -5143,6 +5144,22 @@ test "defaultProviderKey stays null when provider entry omits api key" {
     var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
     try cfg.parseJson(json);
     try std.testing.expect(cfg.defaultProviderKey() == null);
+}
+
+test "sandboxEnabled defaults to true and honors explicit override" {
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .allocator = std.testing.allocator,
+    };
+
+    try std.testing.expect(cfg.sandboxEnabled());
+
+    cfg.security.sandbox.enabled = false;
+    try std.testing.expect(!cfg.sandboxEnabled());
+
+    cfg.security.sandbox.enabled = true;
+    try std.testing.expect(cfg.sandboxEnabled());
 }
 
 test "tools.media.audio with language only parses correctly" {

@@ -1178,7 +1178,7 @@ pub const ChannelRuntime = struct {
             .bootstrap_provider = bootstrap_provider,
             .backend_name = config.memory.backend,
             .sandbox_backend = config.security.sandbox.backend,
-            .sandbox_enabled = config.security.sandbox.enabled orelse false,
+            .sandbox_enabled = config.sandboxEnabled(),
         }) catch &.{};
         errdefer if (tools.len > 0) tools_mod.deinitTools(allocator, tools);
 
@@ -1300,7 +1300,7 @@ pub fn runTelegramLoop(
     var evict_counter: u32 = 0;
 
     const model = config.default_model orelse {
-        log.err("No default model configured. Set agents.defaults.model.primary in ~/.nullclaw/config.json or run `nullclaw onboard`.", .{});
+        log.err("No default model configured. Set agents.defaults.model.primary in config.json in your nullclaw config directory or run `nullclaw onboard`.", .{});
         return;
     };
 

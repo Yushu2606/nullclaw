@@ -137,8 +137,9 @@ pub const ShellTool = struct {
     /// against workspace + allowed_paths before passing to child processes.
     path_env_vars: []const []const u8 = &.{},
     sandbox: ?Sandbox = null,
+    // Storage for sandbox backends; must outlive the ShellTool.
+    // This is part of the vtable ownership pattern: the tool creator owns the storage.
     sandbox_storage: SandboxStorage = .{},
-
     pub const tool_name = "shell";
     pub const tool_description = "Execute a shell command in the workspace directory";
     pub const tool_params =
@@ -254,7 +255,6 @@ pub const ShellTool = struct {
         // explicitly invokes PowerShell so pipes stay inside PowerShell instead
         // of being interpreted by cmd.exe first.
         const proc = @import("process_util.zig");
-
         // Determine base argv and ownership
         var base_argv: []const []const u8 = undefined;
         var maybe_owned_argv: ?[]const []const u8 = null;
@@ -281,7 +281,7 @@ pub const ShellTool = struct {
         }
 
         // Apply sandbox wrapper if configured.
-        var wrap_buf: [256][]const u8 = undefined;
+        var wrap_buf: [512][]const u8 = undefined;
         const final_argv = try wrapCommandArgv(self.sandbox, base_argv, &wrap_buf);
 
         // Execute command.
