@@ -76,6 +76,7 @@ nullclaw onboard --interactive
 - 用于控制运行时诊断与可观测性输出。
 - 配置 OpenTelemetry 时，请使用嵌套的 `diagnostics.otel` 对象。
 - OTEL spans 会在回合完成、agent 结束等自然运行边界触发 flush；更长运行流程仍保留批量 flush 作为兜底。
+- OTEL endpoint 应优先使用 HTTPS；只有 localhost 或私有网络 collector 才适合使用明文 HTTP。
 
 示例：
 
@@ -88,7 +89,7 @@ nullclaw onboard --interactive
     "log_message_payloads": true,
     "log_llm_io": true,
     "otel": {
-      "endpoint": "http://otel:4318",
+      "endpoint": "https://otel:4318",
       "service_name": "nullclaw",
       "headers": {
         "Authorization": "Bearer example-token"

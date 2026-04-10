@@ -91,6 +91,7 @@ The example below is enough to run local CLI mode (replace API key):
 - Controls runtime diagnostics and observability output.
 - For OpenTelemetry, use the nested `diagnostics.otel` object.
 - OTEL spans are flushed at natural runtime boundaries such as turn completion and agent shutdown, with batch flushing still used as a fallback for longer-running flows.
+- OTEL endpoints should use HTTPS. Plain HTTP is appropriate only for localhost/private collectors.
 
 Example:
 
@@ -103,7 +104,7 @@ Example:
     "log_message_payloads": true,
     "log_llm_io": true,
     "otel": {
-      "endpoint": "http://otel:4318",
+      "endpoint": "https://otel:4318",
       "service_name": "nullclaw",
       "headers": {
         "Authorization": "Bearer example-token"

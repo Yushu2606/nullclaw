@@ -1776,9 +1776,9 @@ test "OtelObserver init defaults" {
 }
 
 test "OtelObserver init custom endpoint" {
-    var otel = OtelObserver.init(std.testing.allocator, "http://otel:4318", "myservice");
+    var otel = OtelObserver.init(std.testing.allocator, "https://otel:4318", "myservice");
     defer otel.deinit();
-    try std.testing.expectEqualStrings("http://otel:4318", otel.endpoint);
+    try std.testing.expectEqualStrings("https://otel:4318", otel.endpoint);
     try std.testing.expectEqualStrings("myservice", otel.service_name);
 }
 
