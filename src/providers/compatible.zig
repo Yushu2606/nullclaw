@@ -132,8 +132,26 @@ fn isResponsesFallbackMessage(message: []const u8) bool {
         containsAsciiFold(trimmed, "/chat/completions");
 }
 
+fn isPlainTextResponsesFallbackMessage(body: []const u8) bool {
+    const trimmed = std.mem.trim(u8, body, " \t\r\n");
+    if (trimmed.len == 0) return false;
+
+    // Some compatible gateways return a plain-text 404 instead of a JSON error
+    // envelope when /chat/completions is missing.
+    return containsAsciiFold(trimmed, "/chat/completions") and
+        (containsAsciiFold(trimmed, "404") or
+            containsAsciiFold(trimmed, "not found") or
+            containsAsciiFold(trimmed, "unknown endpoint") or
+            containsAsciiFold(trimmed, "endpoint not found"));
+}
+
 fn shouldFallbackToResponses(allocator: std.mem.Allocator, body: []const u8) bool {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return false;
+    const trimmed = std.mem.trim(u8, body, " \t\r\n");
+    if (trimmed.len == 0) return false;
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{}) catch {
+        return isPlainTextResponsesFallbackMessage(trimmed);
+    };
     defer parsed.deinit();
     if (parsed.value != .object) return false;
 
@@ -1571,6 +1589,17 @@ pub const OpenAiCompatibleProvider = struct {
         defer allocator.free(resp_body);
 
         return parseNativeResponse(allocator, resp_body) catch |err| {
+            if (self.supports_responses_fallback and shouldFallbackToResponses(allocator, resp_body)) {
+                return self.chatViaResponses(
+                    allocator,
+                    capped_request,
+                    effective_model,
+                    temperature,
+                    capped_request.timeout_secs,
+                ) catch |fallback_err| {
+                    return returnLoggedCompatibleApiError(ChatResponse, allocator, self.name, fallback_err, url, resp_body);
+                };
+            }
             logCompatibleApiError(allocator, self.name, err, url, resp_body);
             return err;
         };
@@ -2524,6 +2553,32 @@ test "shouldFallbackToResponses accepts msg fallback fields" {
     try std.testing.expect(shouldFallbackToResponses(std.testing.allocator, "{\"error\":{\"msg\":\"Not found\",\"code\":404}}"));
     try std.testing.expect(shouldFallbackToResponses(std.testing.allocator, "{\"status\":404,\"msg\":\"unknown endpoint\"}"));
     try std.testing.expect(!shouldFallbackToResponses(std.testing.allocator, "{\"error\":{\"msg\":\"No endpoints found that support image input\",\"code\":404}}"));
+}
+
+test "structured chat endpoint 404 payloads surface as ApiError" {
+    // Regression: #766 follow-up — structured endpoint 404s are still generic
+    // API errors, so the fallback must key off the body instead of parser errors.
+    const body = "{\"error\":{\"message\":\"https://integrate.api.nvidia.com/v1/chat/completions 404 page not found\",\"code\":404}}";
+
+    try std.testing.expectError(error.ApiError, OpenAiCompatibleProvider.parseTextResponse(std.testing.allocator, body));
+    try std.testing.expectError(error.ApiError, OpenAiCompatibleProvider.parseNativeResponse(std.testing.allocator, body));
+}
+
+test "shouldFallbackToResponses accepts plain text chat endpoint 404" {
+    // Regression: #766 — some gateways return the missing endpoint as plain
+    // text instead of a JSON error envelope.
+    try std.testing.expect(shouldFallbackToResponses(
+        std.testing.allocator,
+        "https://integrate.api.nvidia.com/v1/chat/completions 404 page not found",
+    ));
+    try std.testing.expect(!shouldFallbackToResponses(
+        std.testing.allocator,
+        "https://integrate.api.nvidia.com/v1/responses 404 page not found",
+    ));
+    try std.testing.expect(!shouldFallbackToResponses(
+        std.testing.allocator,
+        "temporary overload",
+    ));
 }
 
 test "returnLoggedCompatibleApiError preserves fallback error" {
